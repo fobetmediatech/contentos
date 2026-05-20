@@ -32,7 +32,25 @@ export function extractFollowerCounts(
     const handle = reel.ownerUsername
     if (!handle) continue
 
-    const followers = reel.ownerFollowersCount ?? 0
+    // Try every known field-name variant that different actor versions use.
+    // ScrapedReelRaw normalises the three most common ones but the raw object
+    // coming out of the niche cache may still carry actor-specific extras,
+    // so we cast to any for the long tail of undocumented field names.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const raw = reel as any
+    const followers: number =
+      reel.ownerFollowersCount ??
+      reel.authorFollowersCount ??
+      reel.followersCount ??
+      raw?.owner?.followersCount ??
+      raw?.owner?.follower_count ??
+      raw?.ownerfollowerscount ??
+      raw?.videoOwnerFollowersCount ??
+      raw?.videoOwnerFollowerCount ??
+      raw?.coauthorProducers?.[0]?.followerCount ??
+      raw?.coauthorProducers?.[0]?.followersCount ??
+      0
+
     if (followers <= 0) continue
 
     // Keep the highest value seen for this handle across all reels.

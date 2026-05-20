@@ -197,7 +197,33 @@ export const researchNewClient = inngest.createFunction(
         "get-follower-counts",
         async () => {
           const stage1Reels = await fetchFromNicheCache(cacheKey)
+
+          // Diagnostic: show raw field names from first 3 reels so we can
+          // confirm which follower-count field Apify is actually returning.
+          const sample = stage1Reels.slice(0, 3)
+          console.log(
+            "[get-follower-counts] sample reel keys:",
+            sample.map((r) => Object.keys(r))
+          )
+          console.log(
+            "[get-follower-counts] sample owner fields:",
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            sample.map((r: any) => ({
+              ownerUsername: r.ownerUsername,
+              ownerFollowersCount: r.ownerFollowersCount,
+              authorFollowersCount: r.authorFollowersCount,
+              followersCount: r.followersCount,
+              owner: r.owner,
+              videoOwnerFollowersCount: r.videoOwnerFollowersCount,
+              coauthorProducers: r.coauthorProducers,
+            }))
+          )
+
           const map = extractFollowerCounts(stage1Reels)
+          console.log(
+            `[get-follower-counts] extracted ${map.size} handles with follower data ` +
+              `out of ${stage1Reels.length} reels`
+          )
           // Maps don't serialise; shape as a plain Record for Inngest state.
           return Object.fromEntries(map.entries()) as Record<string, number>
         }
@@ -254,7 +280,16 @@ export const researchNewClient = inngest.createFunction(
           )
         }
 
-        return discoverCompetitors(stage1Reels, followerMap)
+        const profiles = discoverCompetitors(stage1Reels, followerMap)
+        console.log(
+          `[discover-competitors] profiles found: ${profiles.topPerforming.length + profiles.highViews.length} ` +
+            `(topPerforming=${profiles.topPerforming.length}, highViews=${profiles.highViews.length})`
+        )
+        console.log(
+          "[discover-competitors] sample profiles:",
+          [...profiles.topPerforming, ...profiles.highViews].slice(0, 2)
+        )
+        return profiles
       })
       const { topPerforming, highViews } = competitorBundle
 
