@@ -193,8 +193,9 @@ export async function storeCompetitorProfiles(
       competitor_type: p.type,
       avg_recent_virality: p.avgRecentVirality ?? null,
       recent_reel_count: p.recentReelCount ?? null,
-      // total_views requires: ALTER TABLE competitor_profiles ADD COLUMN total_views bigint;
-      total_views: p.totalViews ?? null,
+      // total_views omitted — column not yet in schema; add migration
+      // ALTER TABLE competitor_profiles ADD COLUMN total_views bigint;
+      // before re-enabling.
     }))
   )
 }
@@ -255,6 +256,9 @@ export async function insertScrapedReelRows(
     hashtags: reel.hashtags ?? [],
     published_at: reel.timestamp ?? null,
     followers_at_scrape: followers,
+    // NOTE: virality_score is a GENERATED ALWAYS column in the DB —
+    // do NOT include it here or PostgreSQL will reject the insert.
+    // The DB computes it automatically as (views / followers_at_scrape).
     // Transcript
     transcript: transcript?.text ?? null,
     transcript_source: transcript?.source ?? null,
@@ -268,8 +272,6 @@ export async function insertScrapedReelRows(
     text_driven: classification?.text_driven ?? null,
     cut_count: classification?.cut_count ?? null,
     classifier_confidence: classification?.confidence ?? null,
-    // Virality score — computed here so the dissect step can sort by it
-    virality_score: followers > 0 ? (reel.videoViewCount ?? 0) / Math.max(followers, 1) : 0,
     // Competitor type — top-level column
     competitor_type: competitorType,
     // analysis jsonb — kept for backward-compat with display queries
@@ -437,7 +439,12 @@ export async function storeKeywordClusters(
       agency_id: agencyId,
       research_run_id: researchRunId,
       keywords: [c.primary_hashtag, ...c.secondary_hashtags],
+      // hashtags column is NOT NULL — mirror keywords until the pipeline
+      // produces a separate hashtag list (the two arrays are equivalent
+      // for our current keyword agent output).
+      hashtags: [c.primary_hashtag, ...c.secondary_hashtags],
       intent: c.intent,
+      language: c.language ?? null,
     }))
   )
 }

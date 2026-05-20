@@ -17,14 +17,6 @@ function formatFollowers(n: number | null): string {
   return String(n)
 }
 
-function formatViews(n: number | null): string {
-  if (n === null) return "—"
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
-  return String(n)
-}
-
 // ---------------------------------------------------------------------------
 // Competitor card
 // ---------------------------------------------------------------------------
@@ -70,12 +62,6 @@ function CompetitorCard({ profile }: { profile: CompetitorRow }) {
               </dd>
             </>
           )}
-        {profile.total_views !== null && profile.total_views > 0 && (
-          <>
-            <dt className="text-muted-foreground">Total views</dt>
-            <dd className="font-medium">{formatViews(profile.total_views)}</dd>
-          </>
-        )}
         {profile.recent_reel_count !== null &&
           profile.recent_reel_count > 0 && (
             <>

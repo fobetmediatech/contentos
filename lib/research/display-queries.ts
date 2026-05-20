@@ -16,8 +16,6 @@ export type CompetitorRow = {
   competitor_type: "big" | "fastest_growing" | "reference"
   avg_recent_virality: number | null
   recent_reel_count: number | null
-  /** Sum of views across all sampled reels. Requires total_views column migration. */
-  total_views: number | null
 }
 
 export const getCompetitorProfiles = cache(
@@ -26,7 +24,7 @@ export const getCompetitorProfiles = cache(
     const { data } = await supabase
       .from("competitor_profiles")
       .select(
-        "id, handle, followers, competitor_type, avg_recent_virality, recent_reel_count, total_views"
+        "id, handle, followers, competitor_type, avg_recent_virality, recent_reel_count"
       )
       .eq("client_id", clientId)
       // Only show the two discovered categories — reference creators are
