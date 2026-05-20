@@ -205,10 +205,10 @@ export const researchNewClient = inngest.createFunction(
       // stored here; they are a scraping hint only)
       // -----------------------------------------------------------------
       await step.run("store-competitor-profiles", async () => {
-        await storeCompetitorProfiles(clientId, agencyId, researchRunId, [
-          ...topPerforming,
-          ...highViews,
-        ])
+        const allProfiles = [...topPerforming, ...highViews]
+        console.log(`[step 4b] storing ${allProfiles.length} competitor profiles`)
+        await storeCompetitorProfiles(clientId, agencyId, researchRunId, allProfiles)
+        console.log(`[step 4b] competitor profiles stored successfully`)
       })
 
       // competitorTypeByHandle — built from the small step output; used
@@ -303,7 +303,9 @@ export const researchNewClient = inngest.createFunction(
           transcript: transcriptMap.get(r.id) ?? null,
           classification: classificationMap.get(r.id) ?? null,
         }))
+        console.log(`[step 5e] calling insertScrapedReelRows with ${rows.length} rows`)
         await insertScrapedReelRows(clientId, agencyId, researchRunId, rows)
+        console.log(`[step 5e] insertScrapedReelRows complete`)
 
         return { totalReels: allReels.length }
       })
@@ -434,6 +436,7 @@ export const researchNewClient = inngest.createFunction(
           reelsAnalysed: dissected,
           pillarsCreated: pillars.length,
           hooksAdded: hookCount,
+          competitorsFound: topPerforming.length + highViews.length,
         })
 
         // Phase 1.4 wires email next; Phase 1.8 wires the in-app notif.

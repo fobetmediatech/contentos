@@ -55,12 +55,20 @@ export function buildPillarPrompt(params: {
   const bestHookType = Object.entries(params.summary.hook_virality)
     .sort(([, a], [, b]) => b - a)[0]?.[0]
 
+  const l = params.icp.hinglish_level
+  const hinglishInstruction =
+    l <= 1
+      ? "Pure English — all topic titles in English only"
+      : l <= 3
+        ? "Natural Hinglish mix — blend English and Hindi words in topic titles (e.g. 'Apni Salary Kaise Negotiate Karein')"
+        : "Heavy Hindi — topic titles mostly in Hindi/Hinglish, English only for technical terms"
+
   return `Build content pillars grounded in real competitor analysis.
 
 BRAND:
 Niche: ${params.icp.niche}
 Pain points: ${params.icp.pain_points.join(", ")}
-Hinglish level: ${params.icp.hinglish_level}
+Hinglish level: ${params.icp.hinglish_level}/5 — ${hinglishInstruction}
 Tone: ${params.icp.content_tone.join(", ")}
 
 WHAT WORKS IN THIS NICHE (${params.summary.total_reels_analysed} reels analysed):
@@ -88,7 +96,8 @@ Create EXACTLY 5 content pillars — no more, no less. Each MUST specify:
 - best_hook_types (array of 1–2 types that suit this pillar)
 - emotion_target
 - cta_type
-- EXACTLY 5 topic ideas in the audience's own language (no more, no less)
+- EXACTLY 5 topic ideas (no more, no less) — topic titles MUST follow this language rule: ${hinglishInstruction}
+- Topics must sound like how the TARGET AUDIENCE actually speaks — not formal English
 - Grounded in the data above — not generic advice`
 }
 

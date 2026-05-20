@@ -113,6 +113,7 @@ export async function markResearchComplete(
     reelsAnalysed: number
     pillarsCreated: number
     hooksAdded: number
+    competitorsFound: number
   }
 ): Promise<void> {
   const supabase = createAdminClient()
@@ -131,6 +132,7 @@ export async function markResearchComplete(
     reels_analysed: summary.reelsAnalysed,
     pillars_created: summary.pillarsCreated,
     hooks_added: summary.hooksAdded,
+    competitors_found: summary.competitorsFound,
   }).eq("id", researchRunId)
 
   await supabase
@@ -184,7 +186,7 @@ export async function storeCompetitorProfiles(
     .delete()
     .eq("client_id", clientId)
 
-  await supabase.from("competitor_profiles").insert(
+  const { error: insertError } = await supabase.from("competitor_profiles").insert(
     profiles.map((p) => ({
       client_id: clientId,
       agency_id: agencyId,
@@ -199,6 +201,10 @@ export async function storeCompetitorProfiles(
       // before re-enabling.
     }))
   )
+  if (insertError) {
+    throw new Error(`[storeCompetitorProfiles] insert failed: ${insertError.message}`)
+  }
+  console.log(`[storeCompetitorProfiles] wrote ${profiles.length} profiles for client ${clientId}`)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +292,16 @@ export async function insertScrapedReelRows(
 
   const CHUNK = 50
   for (let i = 0; i < payload.length; i += CHUNK) {
-    await supabase.from("scraped_reels").insert(payload.slice(i, i + CHUNK))
+    const chunk = payload.slice(i, i + CHUNK)
+    const { error: chunkError } = await supabase.from("scraped_reels").insert(chunk)
+    if (chunkError) {
+      throw new Error(
+        `[insertScrapedReelRows] chunk ${Math.floor(i / CHUNK) + 1} failed: ${chunkError.message}`
+      )
+    }
+    console.log(
+      `[insertScrapedReelRows] wrote ${Math.min(i + CHUNK, payload.length)}/${payload.length} reels`
+    )
   }
 }
 
@@ -437,7 +452,7 @@ export async function storeKeywordClusters(
   // Clear clusters from previous runs — always replaced wholesale.
   await supabase.from("keyword_clusters").delete().eq("client_id", clientId)
 
-  await supabase.from("keyword_clusters").insert(
+  const { error: insertError } = await supabase.from("keyword_clusters").insert(
     clusters.map((c) => ({
       client_id: clientId,
       agency_id: agencyId,
@@ -451,6 +466,10 @@ export async function storeKeywordClusters(
       language: c.language ?? null,
     }))
   )
+  if (insertError) {
+    throw new Error(`[storeKeywordClusters] insert failed: ${insertError.message}`)
+  }
+  console.log(`[storeKeywordClusters] wrote ${clusters.length} clusters for client ${clientId}`)
 }
 
 // ---------------------------------------------------------------------------
