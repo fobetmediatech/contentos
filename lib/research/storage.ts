@@ -2,6 +2,7 @@ import "server-only"
 
 import { createAdminClient } from "@/lib/supabase/admin"
 import { embedText } from "@/lib/gemini/embeddings"
+import type { CompetitorProfileData } from "@/lib/apify/get-follower-counts"
 import type {
   CompetitorProfile,
   HookType,
@@ -205,6 +206,59 @@ export async function storeCompetitorProfiles(
     throw new Error(`[storeCompetitorProfiles] insert failed: ${insertError.message}`)
   }
   console.log(`[storeCompetitorProfiles] wrote ${profiles.length} profiles for client ${clientId}`)
+}
+
+/**
+ * Enrich existing competitor_profiles rows with real data from the Apify
+ * profile scraper (followers, profile picture URL, full name).
+ *
+ * Called from the `fetch-competitor-data` Inngest step, which runs AFTER
+ * the initial insert so the rows are guaranteed to exist.
+ *
+ * DB columns used:
+ *   followers    → bigint (already present)
+ *   profile_url  → text  (already present — stores profilePicUrl)
+ *   full_name    → text  ← REQUIRES MIGRATION before this field is written:
+ *
+ *     ALTER TABLE competitor_profiles
+ *     ADD COLUMN IF NOT EXISTS full_name text;
+ *
+ * Until that migration is applied, full_name is silently skipped and only
+ * followers + profile_url are updated.
+ */
+export async function updateCompetitorProfileEnrichment(
+  clientId: string,
+  enrichment: Map<string, CompetitorProfileData>
+): Promise<void> {
+  if (enrichment.size === 0) return
+  const supabase = createAdminClient()
+
+  const updates = Array.from(enrichment.entries()).map(([handle, data]) => {
+    const patch: Record<string, unknown> = {}
+
+    // Only overwrite followers if we got a real number (> 0).
+    if (data.followers > 0) patch.followers = data.followers
+
+    // `profile_url` stores the Instagram profile picture URL.
+    if (data.profilePicUrl) patch.profile_url = data.profilePicUrl
+
+    // `full_name` requires the migration above. Uncomment once applied:
+    // if (data.fullName) patch.full_name = data.fullName
+
+    if (Object.keys(patch).length === 0) return Promise.resolve()
+
+    return supabase
+      .from("competitor_profiles")
+      .update(patch)
+      .eq("client_id", clientId)
+      .eq("handle", handle)
+  })
+
+  await Promise.all(updates)
+  console.log(
+    `[updateCompetitorProfileEnrichment] enriched ${enrichment.size} profiles ` +
+      `for client ${clientId} (followers + profile_url)`
+  )
 }
 
 // ---------------------------------------------------------------------------
