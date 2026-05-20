@@ -80,8 +80,12 @@ function normaliseItem(raw: Record<string, unknown>): ScrapedReelRaw {
       (raw.followersCount ?? owner?.followersCount) as number | undefined,
     // Normalise all three field-name variants into ownerFollowersCount so
     // extractFollowerCounts only needs to read one field.
+    // Normalise all known field-name variants into ownerFollowersCount.
+    // Debug logs confirmed the actual Apify response uses top-level
+    // followersCount, so that takes priority after the explicit field.
     ownerFollowersCount:
       (raw.ownerFollowersCount ??
+       raw.followersCount ??
        raw.authorFollowersCount ??
        owner?.followersCount) as number | undefined,
     musicInfo: raw.musicInfo as ScrapedReelRaw["musicInfo"],

@@ -197,20 +197,6 @@ export const researchNewClient = inngest.createFunction(
         "get-follower-counts",
         async () => {
           const stage1Reels = await fetchFromNicheCache(cacheKey)
-          console.log("[debug] total reels from cache:", stage1Reels.length)
-          console.log(
-            "[debug] first reel ALL keys:",
-            stage1Reels.length > 0
-              ? JSON.stringify(Object.keys(stage1Reels[0]))
-              : "empty"
-          )
-          console.log(
-            "[debug] first reel raw:",
-            stage1Reels.length > 0
-              ? JSON.stringify(stage1Reels[0]).slice(0, 500)
-              : "empty"
-          )
-
           const map = extractFollowerCounts(stage1Reels)
           console.log(
             `[get-follower-counts] extracted ${map.size} handles with follower data ` +
