@@ -177,11 +177,12 @@ export async function storeCompetitorProfiles(
   if (profiles.length === 0) return
   const supabase = createAdminClient()
 
-  // Clear previous rows for this run (idempotency).
+  // Delete ALL profiles for this client across all runs so re-runs
+  // replace the previous 10 rather than accumulating more rows.
   await supabase
     .from("competitor_profiles")
     .delete()
-    .eq("research_run_id", researchRunId)
+    .eq("client_id", clientId)
 
   await supabase.from("competitor_profiles").insert(
     profiles.map((p) => ({
@@ -433,6 +434,9 @@ export async function storeKeywordClusters(
 ): Promise<void> {
   if (clusters.length === 0) return
   const supabase = createAdminClient()
+  // Clear clusters from previous runs — always replaced wholesale.
+  await supabase.from("keyword_clusters").delete().eq("client_id", clientId)
+
   await supabase.from("keyword_clusters").insert(
     clusters.map((c) => ({
       client_id: clientId,
@@ -587,6 +591,16 @@ export async function storePillars(
 ): Promise<void> {
   if (pillars.length === 0) return
   const supabase = createAdminClient()
+
+  // Clear auto-generated pillars from all previous runs.
+  // Custom pillars (is_custom = true) are preserved so users don't lose
+  // any pillars they've added manually.
+  await supabase
+    .from("content_pillars")
+    .delete()
+    .eq("client_id", clientId)
+    .eq("is_custom", false)
+
   // Includes `recommended_format` + `best_hook_types` so the
   // pillar cards can surface the format badge and pre-pick hooks
   // in the Script Studio (Phase 1.6). Requires the matching
