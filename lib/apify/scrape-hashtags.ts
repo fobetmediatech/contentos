@@ -91,10 +91,16 @@ export async function scrapeByHashtags(
 ): Promise<ScrapedReelRaw[]> {
   if (hashtags.length === 0) return []
 
+  const cleaned = hashtags.map((h) => h.replace(/^#/, ""))
+  console.log(
+    `[scrape-hashtags] calling Apify with ${cleaned.length} hashtags ` +
+      `(limit=${limit}): ${cleaned.slice(0, 8).join(", ")}${cleaned.length > 8 ? "…" : ""}`
+  )
+
   const run = await apify
     .actor("apify/instagram-hashtag-scraper")
     .call({
-      hashtags: hashtags.map((h) => h.replace(/^#/, "")),
+      hashtags: cleaned,
       resultsLimit: limit,
       includeVideoUrl: true,
       includeAudioData: true,
@@ -102,5 +108,9 @@ export async function scrapeByHashtags(
     })
 
   const { items } = await apify.dataset(run.defaultDatasetId).listItems()
-  return (items as Record<string, unknown>[]).map(normaliseItem)
+  const normalised = (items as Record<string, unknown>[]).map(normaliseItem)
+  console.log(
+    `[scrape-hashtags] Apify returned ${items.length} raw items → ${normalised.length} normalised`
+  )
+  return normalised
 }

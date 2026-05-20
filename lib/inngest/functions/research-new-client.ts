@@ -7,6 +7,7 @@ import {
   buildNicheCacheKey,
   fetchFromNicheCache,
   scrapeOrCacheHashtags,
+  writeToNicheCache,
 } from "@/lib/apify/niche-cache"
 import { scrapeByHashtags } from "@/lib/apify/scrape-hashtags"
 import { scrapeAllCompetitorProfiles } from "@/lib/apify/scrape-profiles"
@@ -41,6 +42,22 @@ import type {
   ScrapedReelRaw,
 } from "@/lib/research/types"
 import { inngest, type ResearchNewClientPayload } from "../client"
+
+/**
+ * Derive broad single-word hashtags from the niche name for use as a
+ * last-resort scraping fallback when specific hashtags return nothing.
+ * e.g. "career counseling" → ["career", "counseling", "reels", "india", "trending"]
+ */
+function deriveBroaderHashtags(niche: string): string[] {
+  const words = niche
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 2)
+  // High-volume discovery tags common on Indian Instagram reels
+  const discovery = ["reels", "india", "trending"]
+  return [...new Set([...words, ...discovery])].slice(0, 6)
+}
 
 /**
  * The new-client research pipeline (Phase 1.4 + step-output-size fix).
@@ -98,27 +115,69 @@ export const researchNewClient = inngest.createFunction(
       const hashtags = flattenClusters(clusters)
 
       // -----------------------------------------------------------------
-      // Step 2: Stage 1 hashtag scrape (with niche cache — L1)
+      // Step 2: Stage 1 hashtag scrape — 3-attempt fallback strategy
       //
-      // scrapeOrCacheHashtags writes reels to `niche_reel_cache`.
-      // We return only { stage1Count, cacheKey } — no large array in
-      // step output. Downstream steps call fetchFromNicheCache(cacheKey).
+      // Attempt 1: Full hashtag list via the niche cache (fast + free
+      //   for repeat niches within the same week).
+      // Attempt 2: Top 3 primary hashtags only — narrows the query when
+      //   broad lists hit Instagram's anti-scrape rate limits.
+      // Attempt 3: Single niche-derived words + discovery tags — very
+      //   broad but almost always returns something.
+      //
+      // All successful results are written to the niche cache so
+      // downstream steps (3, 4, 5) can read via fetchFromNicheCache.
+      // Only throws NonRetriableError after ALL three attempts fail.
       // -----------------------------------------------------------------
       const { stage1Count, cacheKey } = await step.run(
         "scrape-hashtags",
         async () => {
           await updateResearchStep(researchRunId, "finding_competitors")
-          // Build the key before scraping so we can return it even if
-          // the cache is hit and scrapeOrCacheHashtags short-circuits.
           const key = buildNicheCacheKey(niche, hashtags)
-          const reels = await scrapeOrCacheHashtags(hashtags, niche, agencyId)
+
+          // Attempt 1 — full list with cache
+          let reels = await scrapeOrCacheHashtags(hashtags, niche, agencyId)
+          console.log(
+            `[scrape-hashtags] attempt 1 (${hashtags.length} hashtags, cache): ${reels.length} reels`
+          )
+
+          // Attempt 2 — top 3 primary hashtags, live scrape
+          if (reels.length < 3) {
+            const top3 = hashtags.slice(0, 3)
+            console.log(
+              `[scrape-hashtags] attempt 2 — top 3 hashtags: ${top3.join(", ")}`
+            )
+            reels = await scrapeByHashtags(top3)
+            console.log(
+              `[scrape-hashtags] attempt 2 result: ${reels.length} reels`
+            )
+            if (reels.length >= 3) {
+              await writeToNicheCache(key, reels, agencyId)
+            }
+          }
+
+          // Attempt 3 — broad single-word hashtags derived from the niche
+          if (reels.length < 3) {
+            const broaderHashtags = deriveBroaderHashtags(niche)
+            console.log(
+              `[scrape-hashtags] attempt 3 — broader hashtags: ${broaderHashtags.join(", ")}`
+            )
+            reels = await scrapeByHashtags(broaderHashtags)
+            console.log(
+              `[scrape-hashtags] attempt 3 result: ${reels.length} reels`
+            )
+            if (reels.length >= 3) {
+              await writeToNicheCache(key, reels, agencyId)
+            }
+          }
+
           return { stage1Count: reels.length, cacheKey: key }
         }
       )
 
-      if (stage1Count === 0) {
+      if (stage1Count < 3) {
         throw new NonRetriableError(
-          "No viral reels found for these hashtags. Try different keywords."
+          `Only ${stage1Count} reel(s) found after 3 scrape attempts. ` +
+            "Instagram may be rate-limiting this niche — try again in a few hours or update your hashtags."
         )
       }
 

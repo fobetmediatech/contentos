@@ -104,7 +104,19 @@ export async function scrapeOrCacheHashtags(
       .gt("expires_at", new Date().toISOString())
       .maybeSingle<{ reels: ScrapedReelRaw[] }>()
 
-    if (!error && data?.reels) return data.reels
+    if (!error && data?.reels && data.reels.length > 0) {
+      console.log(
+        `[niche-cache] HIT key="${cacheKey}" → ${data.reels.length} reels`
+      )
+      return data.reels
+    }
+
+    if (!error && data?.reels && data.reels.length === 0) {
+      // Stale empty cache entry — treat as miss so we re-scrape live.
+      console.warn(
+        `[niche-cache] STALE EMPTY key="${cacheKey}" — forcing fresh scrape`
+      )
+    }
 
     if (error && !isMissingRelation(error)) {
       // Real error (not missing table) — log and fall through to a
@@ -118,9 +130,34 @@ export async function scrapeOrCacheHashtags(
   }
 
   // Miss — scrape live (uses the constant defined in scrape-hashtags).
+  console.log(`[niche-cache] MISS key="${cacheKey}" — scraping live`)
   const reels = await scrapeByHashtags(hashtags)
 
-  // Write (best-effort; missing table = silent skip).
+  // Only cache non-empty results. An empty write would serve the failed
+  // scrape to all clients in this niche for the rest of the week.
+  if (reels.length > 0) {
+    await writeToNicheCache(cacheKey, reels, agencyId)
+  } else {
+    console.warn(
+      `[niche-cache] scrape returned 0 reels for key="${cacheKey}" — skipping cache write`
+    )
+  }
+
+  return reels
+}
+
+/**
+ * Write (or overwrite) a niche cache entry by key. Used by the Inngest
+ * pipeline when a fallback scrape succeeds so downstream steps can read
+ * the results via fetchFromNicheCache(key).
+ */
+export async function writeToNicheCache(
+  cacheKey: string,
+  reels: ScrapedReelRaw[],
+  agencyId: string
+): Promise<void> {
+  if (reels.length === 0) return
+  const supabase = createAdminClient()
   try {
     const { error } = await supabase.from(CACHE_TABLE).upsert({
       cache_key: cacheKey,
@@ -130,12 +167,14 @@ export async function scrapeOrCacheHashtags(
     })
     if (error && !isMissingRelation(error)) {
       console.warn("[niche-cache] write failed:", error)
+    } else if (!error) {
+      console.log(
+        `[niche-cache] wrote ${reels.length} reels under key="${cacheKey}"`
+      )
     }
   } catch (err) {
     if (!isMissingRelation(err)) {
       console.warn("[niche-cache] write threw:", err)
     }
   }
-
-  return reels
 }
