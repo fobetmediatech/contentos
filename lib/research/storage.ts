@@ -359,6 +359,16 @@ export async function fetchReelsForDissection(
   researchRunId: string
 ): Promise<ReelForDissection[]> {
   const supabase = createAdminClient()
+
+  // Diagnostic: total rows stored for this run (regardless of transcript)
+  const { count: totalCount } = await supabase
+    .from("scraped_reels")
+    .select("id", { count: "exact", head: true })
+    .eq("research_run_id", researchRunId)
+  console.log(
+    `[fetchReelsForDissection] total rows in scraped_reels for run ${researchRunId}: ${totalCount ?? 0}`
+  )
+
   const { data, error } = await supabase
     .from("scraped_reels")
     .select(
@@ -372,6 +382,10 @@ export async function fetchReelsForDissection(
     console.error("[fetchReelsForDissection] error:", error)
     return []
   }
+
+  console.log(
+    `[fetchReelsForDissection] rows with non-null transcript: ${(data ?? []).length}`
+  )
 
   return (data ?? []).map((r) => {
     // Resolve format and competitor_type from either the dedicated column

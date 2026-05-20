@@ -272,14 +272,20 @@ export const researchNewClient = inngest.createFunction(
 
         // 5b. Validate video URLs (C2 — drop expired CDN tokens)
         const validReels = await filterValidVideoUrls(allReels)
+        console.log(
+          `[step 5b] URL validation: ${allReels.length} scraped → ${validReels.length} valid video URLs`
+        )
 
-        // 5c. Transcribe (caption-first, Whisper turbo fallback)
+        // 5c. Transcribe (caption-first for validReels, Whisper turbo fallback)
         await updateResearchStep(researchRunId, "reading_reels", {
           reelsScraped: allReels.length,
         })
         const transcriptMap = await transcribeReelsParallel(validReels, {
           concurrency: 3,
         })
+        console.log(
+          `[step 5c] transcriptMap has ${transcriptMap.size} entries from Whisper/caption`
+        )
 
         // 5d. Classify (Gemini video URL — C1)
         await updateResearchStep(researchRunId, "classifying_reels", {
@@ -295,15 +301,30 @@ export const researchNewClient = inngest.createFunction(
           .filter((r) => r.transcript.length > 0)
         const classificationMap = await classifyReelsBatch(classifiable)
 
-        // 5e. Write all rows to DB — virality_score computed inside helper
-        const rows = allReels.map((r) => ({
-          reel: r,
-          competitorType: r.competitor_type,
-          followers: followerMap.get(r.ownerUsername) ?? 0,
-          transcript: transcriptMap.get(r.id) ?? null,
-          classification: classificationMap.get(r.id) ?? null,
-        }))
-        console.log(`[step 5e] calling insertScrapedReelRows with ${rows.length} rows`)
+        // 5e. Write all rows to DB.
+        // Caption fallback: reels that failed URL validation (expired CDN link)
+        // but have a substantive caption (>50 chars) are still stored with a
+        // transcript so the dissect step can process them. This is the most
+        // common case — Instagram CDN URLs expire in hours but captions don't.
+        const rows = allReels.map((r) => {
+          const whisperResult = transcriptMap.get(r.id)
+          const captionFallback =
+            !whisperResult && r.caption && r.caption.trim().length > 50
+              ? { text: r.caption.trim(), source: "caption" as const }
+              : null
+          return {
+            reel: r,
+            competitorType: r.competitor_type,
+            followers: followerMap.get(r.ownerUsername) ?? 0,
+            transcript: whisperResult ?? captionFallback,
+            classification: classificationMap.get(r.id) ?? null,
+          }
+        })
+        const withTranscript = rows.filter((r) => r.transcript !== null).length
+        console.log(
+          `[step 5e] ${rows.length} rows total, ${withTranscript} with transcript ` +
+            `(${rows.length - withTranscript} no transcript — will not be dissected)`
+        )
         await insertScrapedReelRows(clientId, agencyId, researchRunId, rows)
         console.log(`[step 5e] insertScrapedReelRows complete`)
 
@@ -321,6 +342,9 @@ export const researchNewClient = inngest.createFunction(
         await updateResearchStep(researchRunId, "analysing_reels")
 
         const reelsForDissection = await fetchReelsForDissection(researchRunId)
+        console.log(
+          `[step 6] fetchReelsForDissection returned ${reelsForDissection.length} reels (taking top 30)`
+        )
         // Already sorted by virality_score desc; take top 30 (C5)
         const top30 = reelsForDissection.slice(0, 30)
 
