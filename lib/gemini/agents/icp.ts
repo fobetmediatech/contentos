@@ -5,7 +5,7 @@ import { Type, type Schema } from "@google/genai"
 import {
   MODEL_ROUTING,
   THINKING_BUDGETS,
-  ai,
+  generateWithRetry,
   firstText,
   parseJson,
 } from "../client"
@@ -109,7 +109,7 @@ const responseSchema: Schema = {
 }
 
 export async function generateICP(input: ICPInput): Promise<ICPOutput> {
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL_ROUTING.icp_generation,
     contents: [
       { role: "user", parts: [{ text: SYSTEM_PROMPT }] },

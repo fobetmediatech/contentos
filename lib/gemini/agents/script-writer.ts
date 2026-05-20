@@ -1,6 +1,6 @@
 import "server-only"
 
-import { MODEL_ROUTING, THINKING_BUDGETS, ai } from "../client"
+import { MODEL_ROUTING, THINKING_BUDGETS, generateStreamWithRetry } from "../client"
 import type { ReelFormat } from "@/lib/research/types"
 
 /**
@@ -131,7 +131,7 @@ export async function* streamScript(params: {
   pillar: ScriptPillar
   input: ScriptUserInput
 }): AsyncGenerator<string> {
-  const stream = await ai.models.generateContentStream({
+  const stream = await generateStreamWithRetry({
     model: MODEL_ROUTING.script_writing,
     contents: [
       {

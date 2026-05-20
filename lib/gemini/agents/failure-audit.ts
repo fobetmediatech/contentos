@@ -5,7 +5,7 @@ import { Type, type Schema } from "@google/genai"
 import {
   MODEL_ROUTING,
   THINKING_BUDGETS,
-  ai,
+  generateWithRetry,
   firstText,
   parseJson,
 } from "../client"
@@ -126,7 +126,7 @@ const responseSchema: Schema = {
 export async function runFailureAudit(
   input: FailureAuditInput
 ): Promise<FailureAuditOutput> {
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL_ROUTING.failure_audit,
     contents: [
       { role: "user", parts: [{ text: SYSTEM_PROMPT }] },

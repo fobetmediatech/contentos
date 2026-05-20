@@ -1,6 +1,6 @@
 import "server-only"
 
-import { MODEL_ROUTING, THINKING_BUDGETS, ai, firstText } from "../client"
+import { MODEL_ROUTING, THINKING_BUDGETS, generateWithRetry, firstText } from "../client"
 import type { HookType } from "@/lib/research/types"
 
 /**
@@ -38,7 +38,7 @@ Return only the type name (one word from the list above). No quotes, no JSON.`
 }
 
 export async function classifyHook(hookText: string): Promise<HookType | null> {
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL_ROUTING.hook_classification,
     contents: [
       {

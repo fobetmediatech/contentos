@@ -5,7 +5,7 @@ import { Type, type Schema } from "@google/genai"
 import {
   MODEL_ROUTING,
   THINKING_BUDGETS,
-  ai,
+  generateWithRetry,
   firstText,
   parseJson,
 } from "../client"
@@ -223,7 +223,7 @@ const responseSchema: Schema = {
 export async function dissectReel(
   input: DissectorInput
 ): Promise<ReelDissection> {
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL_ROUTING.reel_dissection,
     contents: [
       { role: "user", parts: [{ text: SYSTEM_PROMPT }] },

@@ -33,6 +33,95 @@ export const THINKING_BUDGETS: Record<AgentName, number> = {
   failure_audit: 8192,
 }
 
+// ---------------------------------------------------------------------------
+// Retry wrapper — handles Gemini 503 (high demand) and 429 (rate-limit)
+// with exponential backoff so transient spikes don't burn Inngest retries.
+// ---------------------------------------------------------------------------
+
+const RETRYABLE_STATUSES = [429, 503]
+const MAX_GEMINI_RETRIES = 4
+const BASE_RETRY_MS = 1_000
+
+function isRetryableGeminiError(err: unknown): boolean {
+  if (err instanceof Error) {
+    const msg = err.message
+    // The SDK surfaces errors as "code: 503" inside the message JSON
+    return (
+      msg.includes('"code":503') ||
+      msg.includes('"code":429') ||
+      msg.includes("503") ||
+      msg.includes("429") ||
+      msg.includes("UNAVAILABLE") ||
+      msg.includes("RESOURCE_EXHAUSTED")
+    )
+  }
+  if (err && typeof err === "object" && "status" in err) {
+    return RETRYABLE_STATUSES.includes((err as { status: number }).status)
+  }
+  return false
+}
+
+/**
+ * Drop-in replacement for `ai.models.generateContent` with automatic
+ * exponential-backoff retries on 503 / 429 responses (up to 4 attempts,
+ * 1 s → 2 s → 4 s → 8 s + jitter).  Non-retryable errors are re-thrown
+ * immediately so we don't waste time on auth / schema errors.
+ */
+export async function generateWithRetry(
+  params: Parameters<typeof ai.models.generateContent>[0]
+): Promise<Awaited<ReturnType<typeof ai.models.generateContent>>> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= MAX_GEMINI_RETRIES; attempt++) {
+    try {
+      return await ai.models.generateContent(params)
+    } catch (err) {
+      lastErr = err
+      if (!isRetryableGeminiError(err) || attempt === MAX_GEMINI_RETRIES) {
+        throw err
+      }
+      const delayMs =
+        BASE_RETRY_MS * Math.pow(2, attempt) + Math.random() * 500
+      console.warn(
+        `[gemini] transient error (attempt ${attempt + 1}/${MAX_GEMINI_RETRIES + 1}), ` +
+          `retrying in ${Math.round(delayMs)}ms — ${err instanceof Error ? err.message.slice(0, 80) : err}`
+      )
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+  throw lastErr
+}
+
+/**
+ * Same retry wrapper for streaming generation.
+ * Retries creating the stream (not mid-stream); once the stream starts
+ * it is returned to the caller as-is.
+ */
+export async function generateStreamWithRetry(
+  params: Parameters<typeof ai.models.generateContentStream>[0]
+): Promise<Awaited<ReturnType<typeof ai.models.generateContentStream>>> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= MAX_GEMINI_RETRIES; attempt++) {
+    try {
+      return await ai.models.generateContentStream(params)
+    } catch (err) {
+      lastErr = err
+      if (!isRetryableGeminiError(err) || attempt === MAX_GEMINI_RETRIES) {
+        throw err
+      }
+      const delayMs =
+        BASE_RETRY_MS * Math.pow(2, attempt) + Math.random() * 500
+      console.warn(
+        `[gemini-stream] transient error (attempt ${attempt + 1}/${MAX_GEMINI_RETRIES + 1}), ` +
+          `retrying in ${Math.round(delayMs)}ms — ${err instanceof Error ? err.message.slice(0, 80) : err}`
+      )
+      await new Promise<void>((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+  throw lastErr
+}
+
+// ---------------------------------------------------------------------------
+
 /**
  * Extract the first text part out of a generateContent response.
  * Throws if the model returned nothing — that's almost always a

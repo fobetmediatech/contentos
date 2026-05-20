@@ -5,7 +5,7 @@ import { Type, type Schema } from "@google/genai"
 import {
   MODEL_ROUTING,
   THINKING_BUDGETS,
-  ai,
+  generateWithRetry,
   firstText,
   parseJson,
 } from "../client"
@@ -144,7 +144,7 @@ export async function generatePillars(params: {
   icp: ICPInputForPillar
   summary: DissectionSummary
 }): Promise<PillarOutput[]> {
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL_ROUTING.pillar_generation,
     contents: [
       { role: "user", parts: [{ text: SYSTEM_PROMPT }] },

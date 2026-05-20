@@ -5,7 +5,7 @@ import { Type, type Schema } from "@google/genai"
 import {
   MODEL_ROUTING,
   THINKING_BUDGETS,
-  ai,
+  generateWithRetry,
   firstText,
   parseJson,
 } from "../client"
@@ -76,7 +76,7 @@ export async function classifyReel(input: {
   videoUrl: string
   transcript: string
 }): Promise<ReelClassification> {
-  const response = await ai.models.generateContent({
+  const response = await generateWithRetry({
     model: MODEL_ROUTING.reel_classification,
     contents: [
       { role: "user", parts: [{ text: SYSTEM_PROMPT }] },
