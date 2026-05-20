@@ -10,6 +10,25 @@ import type { ScrapedReelRaw } from "@/lib/research/types"
 const HASHTAG_RESULTS_LIMIT = 25
 
 /**
+ * Sanitise a hashtag so it passes Apify's validation regex:
+ * ^[^!?.,:;\-+=*&%$#@/\~^|<>()[\]{}"'`\s]+$
+ *
+ * Removes: leading # symbols, all whitespace, and every special
+ * character that Apify rejects. Keeps alphanumeric + underscore +
+ * Unicode letters (Hindi/Devanagari hashtags are valid).
+ * Returns an empty string for tags that collapse to nothing so callers
+ * can filter them out.
+ */
+function sanitizeHashtag(tag: string): string {
+  return tag
+    .replace(/^#+/, "")                              // strip leading #
+    .replace(/\s+/g, "")                             // remove all spaces
+    .replace(/[!?.,:;\-+=*&%$#@/\\~^|<>()[\]{}"'`]/g, "") // strip special chars
+    .toLowerCase()
+    .trim()
+}
+
+/**
  * Normalise a raw Apify item into the canonical ScrapedReelRaw shape.
  *
  * Different versions of `apify/instagram-hashtag-scraper` use slightly
@@ -91,7 +110,15 @@ export async function scrapeByHashtags(
 ): Promise<ScrapedReelRaw[]> {
   if (hashtags.length === 0) return []
 
-  const cleaned = hashtags.map((h) => h.replace(/^#/, ""))
+  const cleaned = hashtags
+    .map(sanitizeHashtag)
+    .filter((h) => h.length > 0 && h.length <= 50)
+
+  if (cleaned.length === 0) {
+    console.warn("[scrape-hashtags] all hashtags were filtered out after sanitisation — skipping Apify call")
+    return []
+  }
+
   console.log(
     `[scrape-hashtags] calling Apify with ${cleaned.length} hashtags ` +
       `(limit=${limit}): ${cleaned.slice(0, 8).join(", ")}${cleaned.length > 8 ? "…" : ""}`
