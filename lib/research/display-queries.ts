@@ -16,6 +16,8 @@ export type CompetitorRow = {
   competitor_type: "big" | "fastest_growing" | "reference"
   avg_recent_virality: number | null
   recent_reel_count: number | null
+  /** Sum of views across all sampled reels. Requires total_views column migration. */
+  total_views: number | null
 }
 
 export const getCompetitorProfiles = cache(
@@ -24,9 +26,12 @@ export const getCompetitorProfiles = cache(
     const { data } = await supabase
       .from("competitor_profiles")
       .select(
-        "id, handle, followers, competitor_type, avg_recent_virality, recent_reel_count"
+        "id, handle, followers, competitor_type, avg_recent_virality, recent_reel_count, total_views"
       )
       .eq("client_id", clientId)
+      // Only show the two discovered categories — reference creators are
+      // a scraping hint only and are not stored in competitor_profiles.
+      .in("competitor_type", ["big", "fastest_growing"])
       .order("competitor_type")
       .order("followers", { ascending: false })
     return (data ?? []) as CompetitorRow[]
@@ -48,6 +53,9 @@ export type ReelRow = {
   creator_handle: string | null
   thumbnail_url: string | null
   views: number
+  likes: number
+  comments: number
+  saves: number
   virality_score: number | null
   /** Top-level column if schema has it; otherwise null. */
   format: string | null
@@ -92,11 +100,11 @@ export const getScrapedReels = cache(
     const { data } = await supabase
       .from("scraped_reels")
       .select(
-        "id, instagram_url, creator_handle, thumbnail_url, views, virality_score, format, competitor_type, dissection, audio_name, caption, published_at, analysis"
+        "id, instagram_url, creator_handle, thumbnail_url, views, likes, comments, saves, virality_score, format, competitor_type, dissection, audio_name, caption, published_at, analysis"
       )
       .eq("client_id", clientId)
       .order("virality_score", { ascending: false })
-      .limit(200) // reasonable cap — top 200 by virality
+      .limit(200)
     return (data ?? []) as ReelRow[]
   }
 )

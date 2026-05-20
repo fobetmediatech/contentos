@@ -10,7 +10,6 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { getClient } from "@/lib/clients/queries"
 import { getLatestResearchRun } from "@/lib/research/queries"
 import { CompetitorsSection } from "./_components/competitors-section"
-import { HooksSection } from "./_components/hooks-section"
 import { KeywordsSection } from "./_components/keywords-section"
 import { PillarsSection } from "./_components/pillars-section"
 import { ReelsSection } from "./_components/reels-section"
@@ -69,29 +68,24 @@ export default async function ResearchPage({
       <div className="space-y-6">
         <ResearchCompleteCard clientId={clientId} run={run} />
 
-        {/* 1. Content pillars — always visible first */}
-        <Suspense fallback={<SectionSkeleton label="Loading content pillars…" />}>
-          <PillarsSection clientId={clientId} />
+        {/* 1. Keyword clusters — generated first in the pipeline */}
+        <Suspense fallback={<SectionSkeleton label="Loading keyword clusters…" />}>
+          <KeywordsSection clientId={clientId} />
         </Suspense>
 
-        {/* 2. Competitor profiles */}
+        {/* 2. Competitor profiles — 5 big + 5 fastest growing */}
         <Suspense fallback={<SectionSkeleton label="Loading competitor profiles…" />}>
           <CompetitorsSection clientId={clientId} />
         </Suspense>
 
-        {/* 3. Scraped reels + dissections */}
-        <Suspense fallback={<SectionSkeleton label="Loading scraped reels…" />}>
+        {/* 3. Analysed reels — 100 reels from competitor profiles */}
+        <Suspense fallback={<SectionSkeleton label="Loading analysed reels…" />}>
           <ReelsSection clientId={clientId} />
         </Suspense>
 
-        {/* 4. Hook library */}
-        <Suspense fallback={<SectionSkeleton label="Loading hook library…" />}>
-          <HooksSection clientId={clientId} />
-        </Suspense>
-
-        {/* 5. Keyword clusters */}
-        <Suspense fallback={<SectionSkeleton label="Loading keyword clusters…" />}>
-          <KeywordsSection clientId={clientId} />
+        {/* 4. Content pillars — the strategic output */}
+        <Suspense fallback={<SectionSkeleton label="Loading content pillars…" />}>
+          <PillarsSection clientId={clientId} />
         </Suspense>
       </div>
     </PageContent>

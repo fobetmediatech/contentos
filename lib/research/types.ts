@@ -47,12 +47,14 @@ export type CompetitorProfile = {
   followers: number
   type: CompetitorType
   reels: ScrapedReelRaw[]
-  /** Average virality (views ÷ followers) across this profile's recent reels (≤30 days). 0 for reference creators. */
+  /** Average virality score (views ÷ followers) across all sampled reels. */
   avgRecentVirality: number
-  /** Average raw view count across recent reels (≤30 days). 0 for reference creators. */
+  /** Average raw view count across all sampled reels. */
   avgRecentRawViews: number
-  /** How many of their reels (in our sample) were posted within the last 30 days. */
+  /** Number of sampled reels in our Stage 1 pool. */
   recentReelCount: number
+  /** Total views across all sampled reels. */
+  totalViews: number
 }
 
 export type HookType =

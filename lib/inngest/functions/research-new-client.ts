@@ -9,10 +9,7 @@ import {
   scrapeOrCacheHashtags,
 } from "@/lib/apify/niche-cache"
 import { scrapeByHashtags } from "@/lib/apify/scrape-hashtags"
-import {
-  scrapeAllCompetitorProfiles,
-  scrapeReferenceCreators,
-} from "@/lib/apify/scrape-profiles"
+import { scrapeAllCompetitorProfiles } from "@/lib/apify/scrape-profiles"
 import { filterValidVideoUrls } from "@/lib/apify/validate-video-url"
 import { classifyReelsBatch } from "@/lib/gemini/agents/classifier"
 import { dissectReelsBatch } from "@/lib/gemini/agents/dissector"
@@ -198,19 +195,19 @@ export const researchNewClient = inngest.createFunction(
           )
         }
 
-        return discoverCompetitors(stage1Reels, followerMap, referenceCreators)
+        return discoverCompetitors(stage1Reels, followerMap)
       })
-      const { topPerforming, highViews, referenceCreators: refProfiles } =
-        competitorBundle
+      const { topPerforming, highViews } = competitorBundle
 
       // -----------------------------------------------------------------
-      // Step 4b: Persist discovered competitor profiles
+      // Step 4b: Persist the 10 discovered competitor profiles
+      // (big × 5 + fastest_growing × 5 — reference creators are NOT
+      // stored here; they are a scraping hint only)
       // -----------------------------------------------------------------
       await step.run("store-competitor-profiles", async () => {
         await storeCompetitorProfiles(clientId, agencyId, researchRunId, [
           ...topPerforming,
           ...highViews,
-          ...refProfiles,
         ])
       })
 
@@ -222,9 +219,6 @@ export const researchNewClient = inngest.createFunction(
             (p: CompetitorProfile) => [p.handle, p.type] as const
           ),
           ...highViews.map(
-            (p: CompetitorProfile) => [p.handle, p.type] as const
-          ),
-          ...refProfiles.map(
             (p: CompetitorProfile) => [p.handle, p.type] as const
           ),
         ]
@@ -243,21 +237,17 @@ export const researchNewClient = inngest.createFunction(
       const { totalReels } = await step.run("scrape-profiles", async () => {
         await updateResearchStep(researchRunId, "scraping_profiles")
 
-        // 5a. Scrape — re-fetch stage-1 reels for M2 deduplication
+        // 5a. Scrape 10 profiles (5 big + 5 fastest_growing)
+        // Re-fetch stage-1 reels for M2 deduplication.
         const stage1Reels = await fetchFromNicheCache(cacheKey)
         const competitorProfiles: CompetitorProfile[] = [
           ...topPerforming,
           ...highViews,
         ]
-        const [stage2Map, referenceMap] = await Promise.all([
-          scrapeAllCompetitorProfiles(competitorProfiles, stage1Reels),
-          scrapeReferenceCreators(referenceCreators),
-        ])
-
-        // Merge; reference takes precedence on key collision (M3)
-        const merged = new Map<string, ScrapedReelRaw[]>()
-        for (const [h, reels] of stage2Map) merged.set(h, reels)
-        for (const [h, reels] of referenceMap) merged.set(h, reels)
+        const merged = await scrapeAllCompetitorProfiles(
+          competitorProfiles,
+          stage1Reels
+        )
 
         // Flatten + tag each reel with competitor_type and id
         const allReels: Array<

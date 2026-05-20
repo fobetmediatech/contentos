@@ -82,13 +82,13 @@ ${(Object.entries(params.summary.format_virality) as Array<[string, number]>)
   .map(([f, v]) => `- ${f}: ${v.toFixed(2)}× avg virality`)
   .join("\n")}
 
-Create 5–6 content pillars. Each MUST specify:
+Create EXACTLY 5 content pillars — no more, no less. Each MUST specify:
 - name and purpose
 - recommended_format (the format with highest virality for this pillar's emotion/pattern)
 - best_hook_types (array of 1–2 types that suit this pillar)
 - emotion_target
 - cta_type
-- 5 topic ideas in the audience's own language
+- EXACTLY 5 topic ideas in the audience's own language (no more, no less)
 - Grounded in the data above — not generic advice`
 }
 
@@ -97,8 +97,8 @@ const responseSchema: Schema = {
   properties: {
     pillars: {
       type: Type.ARRAY,
-      minItems: "4",
-      maxItems: "6",
+      minItems: "5",
+      maxItems: "5",
       items: {
         type: Type.OBJECT,
         properties: {

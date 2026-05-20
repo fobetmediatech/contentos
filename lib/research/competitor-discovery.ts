@@ -1,166 +1,92 @@
-import type {
-  CompetitorProfile,
-  ScrapedReelRaw,
-} from "./types"
+import type { CompetitorProfile, ScrapedReelRaw } from "./types"
 
 /**
  * Pure-TypeScript competitor discovery (no LLM).
  *
- * Discovers three categories from Stage 1 hashtag-scrape results:
+ * From Stage 1 hashtag-scrape results, selects exactly 10 profiles
+ * in two equal categories:
  *
- *   topPerforming (DB: "big")
- *     Top 5 by follower count. Established authority accounts in the
- *     niche. Follower count is the proxy for long-term proven reach.
+ *   topPerforming  (DB: "big")
+ *     Top 5 by follower count — established authority accounts.
  *
- *   highViews (DB: "fastest_growing")
- *     Top 5 by combined score = avgRawViews × viralityRatio (Option C).
- *     Surfaces accounts whose recent reels are actually reaching large
- *     audiences AND punching above their follower base simultaneously.
- *     Minimum 50k avg raw views on recent reels to filter out noise.
- *     Must have ≥3 recent reels so one outlier can't skew the score.
+ *   highViews  (DB: "fastest_growing")
+ *     Top 5 by virality score (avg views ÷ followers) across their
+ *     sampled reels — accounts punching above their follower base.
+ *     Selected from profiles NOT already in topPerforming.
  *
- *   reference
- *     Directly from the wizard intake form (M3 fix). Always included
- *     regardless of follower count or score.
+ * Reference creators from the intake form are handled separately by
+ * the pipeline (scrapeReferenceCreators) but are NOT stored in the
+ * competitor_profiles table — they are purely a scraping hint.
  *
- * DB note: the `competitor_type` column CHECK constraint uses
- * "fastest_growing" — that value is preserved so no migration is needed.
- * Only the TypeScript variable is renamed to reflect intent.
- *
- * Follower counts come from the dedicated batch lookup (C3 fix) —
- * never from `scrapedReels[i].followersCount`.
+ * Follower counts come from extractFollowerCounts (already embedded
+ * in the Stage 1 reel payload — no separate Apify call needed).
  */
 
-const MS_PER_DAY = 86_400_000
+/** Minimum followers to qualify — filters out personal/test accounts. */
 const QUALIFIED_FOLLOWERS = 1_000
-const RECENT_DAYS = 30
-const MIN_RECENT_REELS = 3
-/**
- * Minimum average raw views a profile's recent reels must have to
- * qualify for the highViews category. Keeps noise accounts out.
- */
-const MIN_AVG_RECENT_VIEWS = 50_000
 
-/**
- * Total competitor profiles to scrape (topPerforming + highViews combined).
- * Reference creators from the intake form are always included and don't
- * count toward this budget.
- *
- * 10 → 5 topPerforming + 5 highViews
- */
-const MAX_PROFILES = 10
-/** Per-category slice derived from the total budget (split evenly). */
-const MAX_PER_CATEGORY = Math.floor(MAX_PROFILES / 2)
+/** Profiles per category (5 big + 5 fastest_growing = 10 total). */
+const MAX_PER_CATEGORY = 5
 
 export function discoverCompetitors(
   scrapedReels: ScrapedReelRaw[],
-  followerCounts: Map<string, number>,
-  referenceCreators: string[]
+  followerCounts: Map<string, number>
 ): {
   topPerforming: CompetitorProfile[]
   highViews: CompetitorProfile[]
-  referenceCreators: CompetitorProfile[]
 } {
   const byCreator = groupBy(scrapedReels, (r) => r.ownerUsername)
-  const now = Date.now()
 
-  // Build per-creator profile aggregates from Stage 1 data.
+  // Build per-creator aggregates from Stage 1 data.
   const profiles: CompetitorProfile[] = []
+
   for (const [handle, reels] of byCreator.entries()) {
+    if (!handle) continue
+
     const followers = followerCounts.get(handle) ?? 0
-    const recentReels = reels.filter(
-      (r) => now - new Date(r.timestamp).getTime() < RECENT_DAYS * MS_PER_DAY
+    const totalViews = reels.reduce(
+      (sum, r) => sum + (r.videoViewCount ?? 0),
+      0
     )
-
-    const avgRecentRawViews = recentReels.length
-      ? average(recentReels.map((r) => r.videoViewCount))
-      : 0
-
-    const avgRecentVirality = recentReels.length
-      ? average(
-          recentReels.map((r) => r.videoViewCount / Math.max(followers, 1))
-        )
-      : 0
+    const avgViralityScore =
+      followers > 0
+        ? average(reels.map((r) => (r.videoViewCount ?? 0) / followers))
+        : 0
+    const avgViews = totalViews / Math.max(reels.length, 1)
 
     profiles.push({
       handle,
       followers,
       type: "big", // placeholder — overridden when bucketed below
       reels,
-      avgRecentRawViews,
-      avgRecentVirality,
-      recentReelCount: recentReels.length,
+      totalViews,
+      avgRecentVirality: avgViralityScore,
+      avgRecentRawViews: avgViews,
+      recentReelCount: reels.length,
     })
   }
 
-  // Reference set used to keep reference creators in their own bucket only.
-  const referenceSet = new Set(
-    referenceCreators.map((h) => h.replace(/^@/, ""))
-  )
-
-  // Profiles that meet the minimum quality bar and aren't reference creators.
+  // Apply minimum quality bar.
   const qualified = profiles.filter(
-    (p) => p.followers >= QUALIFIED_FOLLOWERS && !referenceSet.has(p.handle)
+    (p) => p.followers >= QUALIFIED_FOLLOWERS
   )
 
-  // ── Category 1: topPerforming ─────────────────────────────────────
-  // Established accounts with the most followers — proven reach.
+  // ── Category 1: topPerforming — top 5 by follower count ──────────
   const topPerforming = [...qualified]
     .sort((a, b) => b.followers - a.followers)
     .slice(0, MAX_PER_CATEGORY)
     .map((p) => ({ ...p, type: "big" as const }))
 
-  const topPerformingHandles = new Set(topPerforming.map((p) => p.handle))
+  const topHandles = new Set(topPerforming.map((p) => p.handle))
 
-  // ── Category 2: highViews ─────────────────────────────────────────
-  // Accounts whose recent reels are both reaching large raw audiences
-  // AND spreading efficiently beyond their follower base.
-  //
-  // Score = avgRawViews × viralityRatio  (Option C)
-  //   - avgRawViews rewards absolute reach
-  //   - viralityRatio rewards efficiency (spreading beyond base)
-  //   - their product amplifies profiles that excel on both dimensions
-  //
-  // Filters:
-  //   - avgRecentRawViews ≥ MIN_AVG_RECENT_VIEWS (50k) — noise floor
-  //   - recentReelCount   ≥ MIN_RECENT_REELS (3)       — need a trend, not a fluke
-  //   - not already in topPerforming                   — no overlapping lists
+  // ── Category 2: highViews — top 5 by virality from remaining ─────
   const highViews = qualified
-    .filter(
-      (p) =>
-        p.avgRecentRawViews >= MIN_AVG_RECENT_VIEWS &&
-        p.recentReelCount >= MIN_RECENT_REELS &&
-        !topPerformingHandles.has(p.handle)
-    )
-    .sort(
-      (a, b) =>
-        b.avgRecentRawViews * b.avgRecentVirality -
-        a.avgRecentRawViews * a.avgRecentVirality
-    )
+    .filter((p) => !topHandles.has(p.handle))
+    .sort((a, b) => b.avgRecentVirality - a.avgRecentVirality)
     .slice(0, MAX_PER_CATEGORY)
-    .map((p) => ({ ...p, type: "fastest_growing" as const })) // DB value preserved
+    .map((p) => ({ ...p, type: "fastest_growing" as const }))
 
-  // ── Category 3: reference ─────────────────────────────────────────
-  // Always include all intake handles. Pre-fill with any Stage 1 data
-  // we already have; the pipeline's reference scrape step fills in reels
-  // for accounts that didn't appear in Stage 1 hashtag results.
-  const referenceProfiles: CompetitorProfile[] = referenceCreators.map(
-    (handle) => {
-      const clean = handle.replace(/^@/, "")
-      const existing = profiles.find((p) => p.handle === clean)
-      return {
-        handle: clean,
-        followers: existing?.followers ?? followerCounts.get(clean) ?? 0,
-        type: "reference" as const,
-        reels: existing?.reels ?? [],
-        avgRecentRawViews: 0,
-        avgRecentVirality: 0,
-        recentReelCount: 0,
-      }
-    }
-  )
-
-  return { topPerforming, highViews, referenceCreators: referenceProfiles }
+  return { topPerforming, highViews }
 }
 
 // ---------------------------------------------------------------------------

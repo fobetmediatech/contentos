@@ -193,6 +193,8 @@ export async function storeCompetitorProfiles(
       competitor_type: p.type,
       avg_recent_virality: p.avgRecentVirality ?? null,
       recent_reel_count: p.recentReelCount ?? null,
+      // total_views requires: ALTER TABLE competitor_profiles ADD COLUMN total_views bigint;
+      total_views: p.totalViews ?? null,
     }))
   )
 }
