@@ -197,26 +197,18 @@ export const researchNewClient = inngest.createFunction(
         "get-follower-counts",
         async () => {
           const stage1Reels = await fetchFromNicheCache(cacheKey)
-
-          // Diagnostic: show raw field names from first 3 reels so we can
-          // confirm which follower-count field Apify is actually returning.
-          const sample = stage1Reels.slice(0, 3)
+          console.log("[debug] total reels from cache:", stage1Reels.length)
           console.log(
-            "[get-follower-counts] sample reel keys:",
-            sample.map((r) => Object.keys(r))
+            "[debug] first reel ALL keys:",
+            stage1Reels.length > 0
+              ? JSON.stringify(Object.keys(stage1Reels[0]))
+              : "empty"
           )
           console.log(
-            "[get-follower-counts] sample owner fields:",
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            sample.map((r: any) => ({
-              ownerUsername: r.ownerUsername,
-              ownerFollowersCount: r.ownerFollowersCount,
-              authorFollowersCount: r.authorFollowersCount,
-              followersCount: r.followersCount,
-              owner: r.owner,
-              videoOwnerFollowersCount: r.videoOwnerFollowersCount,
-              coauthorProducers: r.coauthorProducers,
-            }))
+            "[debug] first reel raw:",
+            stage1Reels.length > 0
+              ? JSON.stringify(stage1Reels[0]).slice(0, 500)
+              : "empty"
           )
 
           const map = extractFollowerCounts(stage1Reels)
