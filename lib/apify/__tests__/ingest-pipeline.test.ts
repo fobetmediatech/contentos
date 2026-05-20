@@ -11,7 +11,7 @@
 // Adjust the import path if running from a different cwd.
 import { toNum } from "../scrape-hashtags"
 import { extractFollowerCounts } from "../get-follower-counts"
-import { discoverCompetitors } from "../../research/competitor-discovery"
+import { discoverCompetitors, validateIngest } from "../../research/competitor-discovery"
 import type { ScrapedReelRaw } from "../../research/types"
 
 // ---------------------------------------------------------------------------
@@ -197,6 +197,63 @@ assert(hv2.length > 0, "highViews still non-empty when follower data absent")
 for (const p of [...tp2, ...hv2]) {
   assertNoNaN(p.avgRecentVirality, `fallback: ${p.handle}.avgRecentVirality no NaN`)
 }
+
+// ---------------------------------------------------------------------------
+// 4. validateIngest — structured pass / fail / warning
+// ---------------------------------------------------------------------------
+console.log("\n── validateIngest ───────────────────────────────────────────────")
+
+// ── 4a. Happy path ──────────────────────────────────────────────────────────
+const { topPerforming: tp3, highViews: hv3, stats: s3 } =
+  discoverCompetitors(pool, knownFollowers)
+const v1 = validateIngest([...tp3, ...hv3], s3)
+assertEqual(v1.canContinue, true,  "happy path: canContinue = true")
+assertEqual(v1.failures.length, 0, "happy path: no failures")
+
+// ── 4b. No competitors ─────────────────────────────────────────────────────
+const emptyStats = {
+  reelsScraped: 0, uniqueOwnersFound: 0, profilesBuilt: 0,
+  profilesWithFollowerCount: 0, competitorProfilesSelected: 0,
+  reelsWithViews: 0, reelsWithLikes: 0, profilesWithViralityScore: 0,
+}
+const v2 = validateIngest([], emptyStats)
+assertEqual(v2.canContinue, false, "empty competitors: canContinue = false")
+assert(v2.failures.length > 0, "empty competitors: failures array non-empty")
+assert(v2.failures[0]!.includes("No competitor profiles"), "failure message mentions no competitors")
+
+// ── 4c. Competitors present but all scores NaN ─────────────────────────────
+const nanProfile = {
+  handle: "nan_creator", followers: 0, type: "big" as const,
+  reels: [], totalViews: 0,
+  avgRecentVirality: NaN, avgRecentRawViews: Infinity, recentReelCount: 0,
+}
+const nanStats = { ...s3, profilesWithViralityScore: 0, reelsWithViews: 5 }
+const v3 = validateIngest([nanProfile], nanStats)
+assertEqual(v3.canContinue, false, "NaN score: canContinue = false")
+assert(
+  v3.failures.some((f) => f.includes("NaN or Infinity")),
+  "NaN score: failure message mentions NaN/Infinity"
+)
+
+// ── 4d. No follower data → warning only, not failure ──────────────────────
+const { topPerforming: tp4, highViews: hv4, stats: s4 } =
+  discoverCompetitors(pool, new Map()) // empty follower map
+const v4 = validateIngest([...tp4, ...hv4], s4)
+// canContinue depends on whether fallback virality scores > 0
+// (they should be, since views exist in mock data)
+assert(
+  v4.failures.every((f) => !f.includes("NaN")),
+  "no-follower-data: no NaN failures (fallback scores are finite)"
+)
+
+// ── 4e. Reels scraped but none have views ─────────────────────────────────
+const noViewStats = { ...s3, reelsWithViews: 0, reelsScraped: 10 }
+const v5 = validateIngest([...tp3, ...hv3], noViewStats)
+assertEqual(v5.canContinue, false, "no views: canContinue = false")
+assert(
+  v5.failures.some((f) => f.includes("view counts")),
+  "no views: failure message mentions view counts"
+)
 
 // ---------------------------------------------------------------------------
 // Summary

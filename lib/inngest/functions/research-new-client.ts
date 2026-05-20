@@ -19,7 +19,7 @@ import { generateICP } from "@/lib/gemini/agents/icp"
 import { generatePillars } from "@/lib/gemini/agents/pillar"
 import { transcribeReelsParallel } from "@/lib/groq/transcribe"
 import { aggregateDissections } from "@/lib/research/aggregate-dissections"
-import { discoverCompetitors } from "@/lib/research/competitor-discovery"
+import { discoverCompetitors, validateIngest } from "@/lib/research/competitor-discovery"
 import {
   extractAndStoreHooks,
   fetchAnalyzedReels,
@@ -279,6 +279,43 @@ export const researchNewClient = inngest.createFunction(
         console.log(`[step 4b] storing ${allProfiles.length} competitor profiles`)
         await storeCompetitorProfiles(clientId, agencyId, researchRunId, allProfiles)
         console.log(`[step 4b] competitor profiles stored successfully`)
+      })
+
+      // -----------------------------------------------------------------
+      // Step 4c: Post-ingest validation
+      //
+      // Validates the discover-competitors output before we spend Apify
+      // credits scraping 10 full profiles. Surfaces a structured warning
+      // and, on hard failure, marks the run failed with a plain-English
+      // message instead of silently producing empty pillars.
+      //
+      // Uses NonRetriableError so Inngest does NOT auto-retry — bad ingest
+      // data won't improve on retry; the user needs to update their inputs.
+      // -----------------------------------------------------------------
+      await step.run("validate-ingest", async () => {
+        const allSelected = [...topPerforming, ...highViews]
+        const validation = validateIngest(allSelected, competitorBundle.stats)
+
+        if (validation.warnings.length > 0) {
+          console.warn(
+            "[validate-ingest] non-fatal warnings:\n" +
+            validation.warnings.map((w) => `  ⚠ ${w}`).join("\n")
+          )
+        }
+
+        if (!validation.canContinue) {
+          const detail = validation.failures.map((f) => `  ✗ ${f}`).join("\n")
+          console.error("[validate-ingest] HARD FAILURE — aborting before content pillars:\n" + detail)
+          throw new NonRetriableError(
+            `Research ingest produced unusable data:\n${validation.failures.join("\n")}`
+          )
+        }
+
+        console.log(
+          `[validate-ingest] passed — ${allSelected.length} competitors, ` +
+          `${competitorBundle.stats.reelsWithViews}/${competitorBundle.stats.reelsScraped} reels with views, ` +
+          `${competitorBundle.stats.profilesWithViralityScore} profiles with virality score`
+        )
       })
 
       // competitorTypeByHandle — built from the small step output; used

@@ -172,6 +172,95 @@ export function discoverCompetitors(
 }
 
 // ---------------------------------------------------------------------------
+// Post-ingest validation
+
+export type IngestWarning = {
+  /** true = pipeline can continue; false = should abort before content pillars */
+  canContinue: boolean
+  /** Human-readable list of problems found */
+  failures: string[]
+  /** Informational observations (non-fatal) */
+  warnings: string[]
+}
+
+/**
+ * Validate the ingest output before proceeding to content-pillar generation.
+ *
+ * Checks:
+ *   1. At least one competitor profile was selected.
+ *   2. At least some reels carry view data (engagement signal available).
+ *   3. At least some profiles have a usable score (follower-based or fallback).
+ *   4. No virality score is NaN or Infinity (arithmetic safety).
+ *
+ * Returns a structured warning that the Inngest step can log and act on.
+ * `canContinue = false` means the pipeline should skip content-pillar
+ * generation and surface a plain-English error to the user — it must NOT
+ * throw, so Inngest doesn't retry an inherently bad data set.
+ */
+export function validateIngest(
+  competitors: CompetitorProfile[],
+  stats: IngestStats
+): IngestWarning {
+  const failures: string[] = []
+  const warnings: string[] = []
+
+  // ── 1. Competitor presence ───────────────────────────────────────────────
+  if (competitors.length === 0) {
+    failures.push(
+      `No competitor profiles were selected. ` +
+      `${stats.uniqueOwnersFound} unique handles found but none passed quality filters. ` +
+      `Try broader or higher-volume hashtags.`
+    )
+  }
+
+  // ── 2. View data ─────────────────────────────────────────────────────────
+  if (stats.reelsWithViews === 0) {
+    failures.push(
+      `None of the ${stats.reelsScraped} scraped reels have view counts. ` +
+      `The scraper may have returned incomplete data — check Apify logs.`
+    )
+  } else if (stats.reelsWithViews < stats.reelsScraped * 0.5) {
+    warnings.push(
+      `Only ${stats.reelsWithViews}/${stats.reelsScraped} reels have view data (< 50%). ` +
+      `Virality scores may be unreliable.`
+    )
+  }
+
+  // ── 3. Usable scores ─────────────────────────────────────────────────────
+  if (competitors.length > 0 && stats.profilesWithViralityScore === 0) {
+    failures.push(
+      `${competitors.length} competitors selected but none have a virality score > 0. ` +
+      `Both follower data and view data appear to be missing — ` +
+      `content pillars cannot be grounded in real performance data.`
+    )
+  } else if (
+    competitors.length > 0 &&
+    stats.profilesWithFollowerCount === 0
+  ) {
+    warnings.push(
+      `No profiles have follower counts — using log-normalised view scores as fallback. ` +
+      `Pillar recommendations will be based on relative views, not virality ratios.`
+    )
+  }
+
+  // ── 4. NaN / Infinity guard ──────────────────────────────────────────────
+  const badScores = competitors.filter(
+    (p) => !isFinite(p.avgRecentVirality) || isNaN(p.avgRecentVirality) ||
+            !isFinite(p.avgRecentRawViews) || isNaN(p.avgRecentRawViews)
+  )
+  if (badScores.length > 0) {
+    failures.push(
+      `${badScores.length} competitor(s) have NaN or Infinity scores: ` +
+      `${badScores.map((p) => p.handle).join(", ")}. ` +
+      `This is a numeric parsing bug — check normaliseItem in scrape-hashtags.ts.`
+    )
+  }
+
+  const canContinue = failures.length === 0
+  return { canContinue, failures, warnings }
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 
 function groupBy<T, K>(items: T[], key: (item: T) => K): Map<K, T[]> {
