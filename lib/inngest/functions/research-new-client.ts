@@ -258,16 +258,14 @@ export const researchNewClient = inngest.createFunction(
           )
         }
 
-        const profiles = discoverCompetitors(stage1Reels, followerMap)
-        console.log(
-          `[discover-competitors] profiles found: ${profiles.topPerforming.length + profiles.highViews.length} ` +
-            `(topPerforming=${profiles.topPerforming.length}, highViews=${profiles.highViews.length})`
-        )
+        const result = discoverCompetitors(stage1Reels, followerMap)
+        // Comprehensive ingest diagnostic — visible in Inngest trace
+        console.log("[ingest-stats]", JSON.stringify(result.stats))
         console.log(
           "[discover-competitors] sample profiles:",
-          [...profiles.topPerforming, ...profiles.highViews].slice(0, 2)
+          [...result.topPerforming, ...result.highViews].slice(0, 2)
         )
-        return profiles
+        return result
       })
       const { topPerforming, highViews } = competitorBundle
 

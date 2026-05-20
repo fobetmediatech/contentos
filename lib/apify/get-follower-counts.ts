@@ -1,3 +1,4 @@
+import { toNum } from "./scrape-hashtags"
 import type { ScrapedReelRaw } from "@/lib/research/types"
 
 /**
@@ -32,17 +33,19 @@ export function extractFollowerCounts(
     const handle = reel.ownerUsername
     if (!handle) continue
 
-    // Debug logs confirmed top-level followersCount is what Apify actually
-    // returns. Prioritise it, then fall back to the normalised field names
-    // for any actor version that uses a different layout.
+    // toNum() handles strings ("1.2K", "12,500"), null, undefined, and
+    // the { count: N } graph-API edge object pattern — never produces NaN.
+    // Prioritise top-level followersCount (confirmed by debug logs), then
+    // fall back to the normalised ownerFollowersCount alias.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw = reel as any
-    const followers: number =
-      reel.followersCount ??
-      reel.ownerFollowersCount ??
+    const followers: number = toNum(
+      reel.followersCount       ??
+      reel.ownerFollowersCount  ??
       reel.authorFollowersCount ??
       raw?.owner?.followersCount ??
-      0
+      null
+    )
 
     if (followers <= 0) continue
 

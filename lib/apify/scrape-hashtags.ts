@@ -10,6 +10,42 @@ import type { ScrapedReelRaw } from "@/lib/research/types"
 const HASHTAG_RESULTS_LIMIT = 25
 
 /**
+ * Robustly parse any Apify numeric field into a safe integer.
+ *
+ * Handles every format the scraper has been observed to return:
+ *   number  → 42000
+ *   string  → "42000", "42,000", "1.2K", "3.4M", "1.2B"
+ *   object  → { count: 42 }  (Instagram graph-API edge pattern)
+ *   null/undefined → 0
+ *
+ * NaN and Infinity are never returned — always falls back to 0.
+ * Exported so get-follower-counts and tests can reuse it.
+ */
+export function toNum(val: unknown): number {
+  if (val == null) return 0
+  if (typeof val === "number") {
+    return isFinite(val) && val >= 0 ? Math.round(val) : 0
+  }
+  if (typeof val === "object") {
+    // Instagram graph-API edge pattern: { count: 42 }
+    const obj = val as Record<string, unknown>
+    if ("count" in obj) return toNum(obj.count)
+    return 0
+  }
+  if (typeof val === "string") {
+    const s = val.trim().replace(/,/g, "")
+    if (!s) return 0
+    const lower = s.toLowerCase()
+    if (lower.endsWith("k")) return Math.round(parseFloat(s) * 1_000)
+    if (lower.endsWith("m")) return Math.round(parseFloat(s) * 1_000_000)
+    if (lower.endsWith("b")) return Math.round(parseFloat(s) * 1_000_000_000)
+    const n = parseFloat(s)
+    return isFinite(n) && n >= 0 ? Math.round(n) : 0
+  }
+  return 0
+}
+
+/**
  * Sanitise a hashtag so it passes Apify's validation regex:
  * ^[^!?.,:;\-+=*&%$#@/\~^|<>()[\]{}"'`\s]+$
  *
@@ -31,31 +67,97 @@ function sanitizeHashtag(tag: string): string {
 /**
  * Normalise a raw Apify item into the canonical ScrapedReelRaw shape.
  *
- * Different versions of `apify/instagram-hashtag-scraper` use slightly
- * different field layouts:
+ * Handles every field-name variant observed across actor versions:
  *   - v1.x  → `ownerUsername` (flat)
  *   - v2.x  → `owner.username` (nested object)
- *   - some  → `username` (flat alias)
+ *   - some  → `username` / `user.username` / `author.username` (flat aliases)
+ *
+ * All numeric fields go through `toNum()` so string-formatted numbers
+ * ("1,200", "1.2K") and null/undefined values never produce NaN downstream.
  *
  * Normalising here — before data reaches the niche cache — means every
  * downstream consumer (competitor discovery, follower lookup, DB writes)
- * always sees `ownerUsername` populated.
+ * always sees consistent types.
  */
 function normaliseItem(raw: Record<string, unknown>): ScrapedReelRaw {
-  const owner = raw.owner as Record<string, unknown> | undefined
+  // Nested sub-objects used by different actor versions
+  const owner   = raw.owner   as Record<string, unknown> | undefined
+  const user    = raw.user    as Record<string, unknown> | undefined
+  const author  = raw.author  as Record<string, unknown> | undefined
+  const profile = raw.profile as Record<string, unknown> | undefined
+  const metrics = raw.metrics as Record<string, unknown> | undefined
+  const reel    = raw.reel    as Record<string, unknown> | undefined
+  const edgeFollowedBy = raw.edge_followed_by as Record<string, unknown> | undefined
 
+  // ── username ────────────────────────────────────────────────────────────
   const ownerUsername =
-    (raw.ownerUsername as string | undefined) ??
-    (owner?.username as string | undefined) ??
-    (raw.username as string | undefined) ??
+    (raw.ownerUsername          as string | undefined) ??
+    (owner?.username            as string | undefined) ??
+    (user?.username             as string | undefined) ??
+    (author?.username           as string | undefined) ??
+    (raw.username               as string | undefined) ??
+    (raw.profileUsername        as string | undefined) ??
     ""
 
-  // Some actor versions return a `shortCode` instead of a full URL.
+  // ── url ─────────────────────────────────────────────────────────────────
   const url =
     (raw.url as string | undefined) ??
     (raw.shortCode
       ? `https://www.instagram.com/reel/${raw.shortCode}/`
       : "")
+
+  // ── follower count ───────────────────────────────────────────────────────
+  // Try every known field-name/nesting pattern. toNum() handles strings,
+  // "1.2K", edge objects, null, and undefined.
+  const rawFollowers =
+    raw.followersCount        ??  // confirmed top-level Apify field
+    raw.ownerFollowersCount   ??
+    raw.authorFollowersCount  ??
+    owner?.followersCount     ??
+    user?.followers_count     ??
+    author?.followersCount    ??
+    profile?.followers        ??
+    profile?.followersCount   ??
+    edgeFollowedBy            ??  // { count: N } pattern from graph API
+    null
+  const parsedFollowers = toNum(rawFollowers)
+  // Store undefined (not 0) when count is absent so callers can distinguish
+  // "genuinely 0 followers" from "data was not in payload".
+  const followersCountValue = parsedFollowers > 0 ? parsedFollowers : undefined
+
+  // ── views ────────────────────────────────────────────────────────────────
+  const videoViewCount = toNum(
+    raw.videoViewCount    ??
+    raw.playCount         ??
+    raw.viewsCount        ??
+    raw.view_count        ??
+    raw.video_play_count  ??
+    reel?.views           ??
+    metrics?.views        ??
+    0
+  )
+
+  // ── likes ────────────────────────────────────────────────────────────────
+  const likesCount = toNum(
+    raw.likesCount                    ??
+    raw.likesNumber                   ??
+    raw.likes                         ??
+    raw.like_count                    ??
+    (raw.edge_liked_by as Record<string, unknown> | undefined) ??
+    metrics?.likes                    ??
+    0
+  )
+
+  // ── comments ─────────────────────────────────────────────────────────────
+  const commentsCount = toNum(
+    raw.commentsCount                             ??
+    raw.commentsNumber                            ??
+    raw.comments                                  ??
+    raw.comment_count                             ??
+    (raw.edge_media_to_comment as Record<string, unknown> | undefined) ??
+    metrics?.comments                             ??
+    0
+  )
 
   return {
     url,
@@ -64,30 +166,23 @@ function normaliseItem(raw: Record<string, unknown>): ScrapedReelRaw {
       (raw.videoPlaybackUrl as string | undefined) ??
       "",
     displayUrl: raw.displayUrl as string | undefined,
-    videoViewCount: ((raw.videoViewCount ?? raw.playCount ?? 0) as number),
-    likesCount: ((raw.likesCount ?? raw.likesNumber ?? 0) as number),
-    commentsCount: ((raw.commentsCount ?? raw.commentsNumber ?? 0) as number),
-    savesCount: raw.savesCount as number | undefined,
+    videoViewCount,
+    likesCount,
+    commentsCount,
+    savesCount: raw.savesCount != null ? toNum(raw.savesCount) : undefined,
     caption: (raw.caption ?? raw.captionText ?? null) as string | null,
     hashtags: (raw.hashtags ?? []) as string[],
     timestamp:
       (raw.timestamp as string | undefined) ??
       (raw.takenAtTimestamp
-        ? new Date((raw.takenAtTimestamp as number) * 1000).toISOString()
+        ? new Date(toNum(raw.takenAtTimestamp) * 1000).toISOString()
         : new Date(0).toISOString()),
     ownerUsername,
-    followersCount:
-      (raw.followersCount ?? owner?.followersCount) as number | undefined,
-    // Normalise all three field-name variants into ownerFollowersCount so
-    // extractFollowerCounts only needs to read one field.
-    // Normalise all known field-name variants into ownerFollowersCount.
-    // Debug logs confirmed the actual Apify response uses top-level
-    // followersCount, so that takes priority after the explicit field.
-    ownerFollowersCount:
-      (raw.ownerFollowersCount ??
-       raw.followersCount ??
-       raw.authorFollowersCount ??
-       owner?.followersCount) as number | undefined,
+    followersCount:    followersCountValue,
+    // Normalise into ownerFollowersCount so extractFollowerCounts only
+    // needs to read one field (confirmed by debug logs).
+    ownerFollowersCount: followersCountValue,
+    authorFollowersCount: undefined, // merged into ownerFollowersCount above
     musicInfo: raw.musicInfo as ScrapedReelRaw["musicInfo"],
   }
 }
