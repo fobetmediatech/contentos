@@ -104,14 +104,21 @@ export async function scrapeOrCacheHashtags(
       .gt("expires_at", new Date().toISOString())
       .maybeSingle<{ reels: ScrapedReelRaw[] }>()
 
-    if (!error && data?.reels && data.reels.length > 0) {
+    const CACHE_MIN = 10
+    if (!error && data?.reels && data.reels.length >= CACHE_MIN) {
       console.log(
         `[niche-cache] HIT key="${cacheKey}" → ${data.reels.length} reels`
       )
       return data.reels
     }
 
-    if (!error && data?.reels && data.reels.length === 0) {
+    if (!error && data?.reels && data.reels.length > 0 && data.reels.length < CACHE_MIN) {
+      // Thin cache entry — a previously blocked/rate-limited scrape wrote
+      // too few reels. Treat as miss and force a fresh live scrape.
+      console.warn(
+        `[niche-cache] THIN CACHE key="${cacheKey}" (${data.reels.length} reels, need ≥ ${CACHE_MIN}) — forcing fresh scrape`
+      )
+    } else if (!error && data?.reels && data.reels.length === 0) {
       // Stale empty cache entry — treat as miss so we re-scrape live.
       console.warn(
         `[niche-cache] STALE EMPTY key="${cacheKey}" — forcing fresh scrape`
@@ -133,10 +140,18 @@ export async function scrapeOrCacheHashtags(
   console.log(`[niche-cache] MISS key="${cacheKey}" — scraping live`)
   const reels = await scrapeByHashtags(hashtags)
 
-  // Only cache non-empty results. An empty write would serve the failed
-  // scrape to all clients in this niche for the rest of the week.
-  if (reels.length > 0) {
+  // Only cache results with a meaningful pool (≥ 10 reels).
+  // A thin result (1–9 reels) means the hashtag scraper was rate-limited
+  // or blocked — caching it would poison every subsequent run this week
+  // for all clients in this niche.
+  const CACHE_MIN = 10
+  if (reels.length >= CACHE_MIN) {
     await writeToNicheCache(cacheKey, reels, agencyId)
+  } else if (reels.length > 0) {
+    console.warn(
+      `[niche-cache] scrape returned only ${reels.length} reel(s) for key="${cacheKey}" — ` +
+        `below CACHE_MIN (${CACHE_MIN}), skipping cache write to avoid poisoning future runs`
+    )
   } else {
     console.warn(
       `[niche-cache] scrape returned 0 reels for key="${cacheKey}" — skipping cache write`

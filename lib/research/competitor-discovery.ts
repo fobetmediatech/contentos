@@ -1,4 +1,8 @@
-import type { CompetitorProfile, ScrapedReelRaw } from "./types"
+import type {
+  CompetitorProfile,
+  CompetitorTier,
+  ScrapedReelRaw,
+} from "./types"
 
 /**
  * Pure-TypeScript competitor discovery (no LLM).
@@ -69,31 +73,35 @@ export function discoverCompetitors(
   for (const [handle, reels] of byCreator.entries()) {
     if (!handle) continue
 
+    const knownFollowers = followerCounts.has(handle)
     const followers = followerCounts.get(handle) ?? 0
-    const totalViews = reels.reduce(
-      (sum, r) => sum + (r.videoViewCount ?? 0),
-      0
-    )
-    const avgViews = safeDivide(totalViews, reels.length)
+    // Only count posts that have actual view data (reels/videos).
+    // Photo/carousel posts from Stage 1 have videoViewCount = 0 — including
+    // them in the average would unfairly dilute virality for accounts that
+    // mix property photos with reels (common in real estate niches).
+    const videoReels = reels.filter((r) => (r.videoViewCount ?? 0) > 0)
+    const totalViews = videoReels.reduce((sum, r) => sum + (r.videoViewCount ?? 0), 0)
+    const avgViews = safeDivide(totalViews, videoReels.length)
 
-    // Virality = avg(views / followers). When followers are unknown (0),
-    // we use a log-normalised view score as a stand-in — filled in
-    // post-hoc once all profiles are built so we can normalise relative
-    // to the max avg views in the batch.
+    // Virality = avg(views / followers) across video posts only.
+    // For unknown-follower accounts, set 0 here — the post-hoc log-normalised
+    // view score (computed after all profiles are built) will fill this in.
     const avgViralityScore =
       followers > 0
-        ? average(reels.map((r) => safeDivide(r.videoViewCount ?? 0, followers)))
+        ? average(videoReels.map((r) => safeDivide(r.videoViewCount ?? 0, followers)))
         : 0   // ← replaced below for followerless profiles
 
     profiles.push({
       handle,
       followers,
+      knownFollowers,
       type: "big", // placeholder — overridden when bucketed below
       reels,
       totalViews,
       avgRecentVirality: avgViralityScore,
       avgRecentRawViews: avgViews,
       recentReelCount: reels.length,
+      videoReelCount: videoReels.length,
     })
   }
 
@@ -109,13 +117,18 @@ export function discoverCompetitors(
   }
 
   // ── Apply minimum quality bar with progressive fallback ──────────────────
-  // Start at QUALIFIED_FOLLOWERS; if fewer than MAX_PER_CATEGORY profiles
-  // pass, lower the bar progressively so we always return something useful.
-  let qualified = profiles.filter((p) => p.followers >= QUALIFIED_FOLLOWERS)
+  // Unknown-follower accounts (scraper didn't return the field) are included
+  // at the primary threshold — absence of data ≠ below threshold.
+  // For known-follower accounts below the bar, relax progressively.
+  let qualified = profiles.filter(
+    (p) => !p.knownFollowers || p.followers >= QUALIFIED_FOLLOWERS
+  )
 
   if (qualified.length < MAX_PER_CATEGORY) {
     for (const threshold of [500, 100, 0]) {
-      const candidate = profiles.filter((p) => p.followers >= threshold)
+      const candidate = profiles.filter(
+        (p) => !p.knownFollowers || p.followers >= threshold
+      )
       if (candidate.length >= MAX_PER_CATEGORY) {
         console.warn(
           `[discoverCompetitors] only ${qualified.length} profiles at ≥${QUALIFIED_FOLLOWERS} followers — ` +
@@ -134,10 +147,28 @@ export function discoverCompetitors(
     }
   }
 
+  // Separate video-active accounts (post Reels) from photo-only accounts.
+  // This is the critical split: photo-only accounts return 0 from Stage 2 scraping.
+  const videoActive = qualified.filter((p) => (p.videoReelCount ?? 0) > 0)
+  const photoOnly = qualified.filter((p) => (p.videoReelCount ?? 0) === 0)
+
+  console.log(
+    `[competitor-discovery] ${videoActive.length} video-active accounts, ` +
+    `${photoOnly.length} photo-only accounts in qualified pool`
+  )
+
   // ── Category 1: topPerforming — top 5 by follower count ──────────────────
+  // Use video-active accounts exclusively. If there are fewer than MAX_PER_CATEGORY
+  // video-active accounts, pad with photo-only accounts ONLY if we truly have no
+  // other choice (i.e. videoActive pool has < 2 accounts). Listing/developer
+  // accounts with 0 video reels waste Apify credits and pollute competitor profiles.
   // When followers are all 0, sort by avg views as a proxy for authority.
-  const allFollowersZero = qualified.every((p) => p.followers === 0)
-  const topPerforming = [...qualified]
+  const topPool =
+    videoActive.length >= 2
+      ? videoActive  // enough video creators — exclude photo-only entirely
+      : qualified    // fallback: too few video creators, allow photo-only as padding
+  const allFollowersZero = topPool.every((p) => p.followers === 0)
+  const topPerforming = [...topPool]
     .sort((a, b) =>
       allFollowersZero
         ? b.avgRecentRawViews - a.avgRecentRawViews
@@ -149,14 +180,32 @@ export function discoverCompetitors(
   const topHandles = new Set(topPerforming.map((p) => p.handle))
 
   // ── Category 2: highViews — top 5 by virality from remaining ─────────────
-  const highViews = qualified
-    .filter((p) => !topHandles.has(p.handle))
+  // Prefer video-active accounts; pad with photo-only only if < 2 remain.
+  const remainingVideo = videoActive.filter((p) => !topHandles.has(p.handle))
+  const highViewsPool =
+    remainingVideo.length >= 2
+      ? remainingVideo
+      : qualified.filter((p) => !topHandles.has(p.handle))
+  const highViews = [...highViewsPool]
     .sort((a, b) => b.avgRecentVirality - a.avgRecentVirality)
     .slice(0, MAX_PER_CATEGORY)
     .map((p) => ({ ...p, type: "fastest_growing" as const }))
 
-  // ── Diagnostic stats ─────────────────────────────────────────────────────
+  // ── Diagnostic stats + summary ────────────────────────────────────────────
   const selected = [...topPerforming, ...highViews]
+  const selectedVideoCount = selected.filter((p) => (p.videoReelCount ?? 0) > 0).length
+  console.log(
+    `[competitor-discovery] selected ${selected.length} competitors: ` +
+    `${selectedVideoCount} video-active, ${selected.length - selectedVideoCount} photo-only`
+  )
+  if (selectedVideoCount === 0 && selected.length > 0) {
+    console.warn(
+      `[competitor-discovery] ⚠️  ALL selected competitors are photo-only — ` +
+      `Stage 2 scraping will return 0 reels. ` +
+      `Add reference creators who post Reels to resolve this.`
+    )
+  }
+
   const stats: IngestStats = {
     reelsScraped:               scrapedReels.length,
     uniqueOwnersFound:          byCreator.size,
@@ -258,6 +307,27 @@ export function validateIngest(
 
   const canContinue = failures.length === 0
   return { canContinue, failures, warnings }
+}
+
+// ---------------------------------------------------------------------------
+
+/**
+ * Pre-compute a competitor tier label for a single reel's account.
+ * Passed directly to the dissector — not re-derived by the LLM.
+ *
+ * For accounts with unknown followers, virality was proxied with raw views
+ * (see discoverCompetitors above) so the tier thresholds won't apply cleanly.
+ * In that case we conservatively return "on_pace".
+ */
+export function computeCompetitorTier(
+  profile: Pick<CompetitorProfile, "avgRecentVirality" | "knownFollowers">
+): CompetitorTier {
+  if (!profile.knownFollowers) return "on_pace"
+  const v = profile.avgRecentVirality
+  if (v >= 3) return "breakout"
+  if (v >= 1.5) return "overperformer"
+  if (v >= 0.5) return "on_pace"
+  return "underperformed"
 }
 
 // ---------------------------------------------------------------------------

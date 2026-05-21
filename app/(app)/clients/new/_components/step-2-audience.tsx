@@ -109,20 +109,23 @@ export function Step2Audience({
           name="painPoints"
           render={({ field }) => (
             <FormItem>
-              <FormLabel>What does the audience struggle with?</FormLabel>
+              <FormLabel>
+                What real-life problems does the audience face?
+              </FormLabel>
               <FormControl>
                 <ChipMultiSelect
                   suggestions={SUGGESTED_PAIN_POINTS}
                   value={field.value}
                   onChange={field.onChange}
                   allowCustom
-                  customPlaceholder="Type a pain point and press Enter"
+                  customPlaceholder={`e.g. "Fear of cancer diagnosis" or "Can't lose belly fat"`}
                   disabled={disabled}
                 />
               </FormControl>
               <FormDescription>
-                Pick from common ones or add your own. We use these directly
-                in the script.
+                Think about their daily struggles — not your Instagram goals.
+                We use these to find the right hashtags and competitor
+                accounts for this niche.
               </FormDescription>
               <FormMessage />
             </FormItem>

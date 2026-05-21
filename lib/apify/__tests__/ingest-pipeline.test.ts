@@ -223,9 +223,9 @@ assert(v2.failures[0]!.includes("No competitor profiles"), "failure message ment
 
 // ── 4c. Competitors present but all scores NaN ─────────────────────────────
 const nanProfile = {
-  handle: "nan_creator", followers: 0, type: "big" as const,
+  handle: "nan_creator", followers: 0, knownFollowers: false, type: "big" as const,
   reels: [], totalViews: 0,
-  avgRecentVirality: NaN, avgRecentRawViews: Infinity, recentReelCount: 0,
+  avgRecentVirality: NaN, avgRecentRawViews: Infinity, recentReelCount: 0, videoReelCount: 0,
 }
 const nanStats = { ...s3, profilesWithViralityScore: 0, reelsWithViews: 5 }
 const v3 = validateIngest([nanProfile], nanStats)

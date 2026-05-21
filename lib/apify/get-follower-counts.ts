@@ -1,6 +1,6 @@
 import "server-only"
 
-import { apify } from "./client"
+import { getApifyClient } from "./client"
 import { toNum } from "./scrape-hashtags"
 import type { ScrapedReelRaw } from "@/lib/research/types"
 
@@ -48,11 +48,12 @@ export async function fetchCompetitorProfiles(
       cleanHandles.join(", ")
   )
 
-  const run = await apify.actor("apify/instagram-profile-scraper").call({
+  const client = getApifyClient()
+  const run = await client.actor("apify/instagram-profile-scraper").call({
     usernames: cleanHandles,
   })
 
-  const { items } = await apify.dataset(run.defaultDatasetId).listItems()
+  const { items } = await client.dataset(run.defaultDatasetId).listItems()
   const result = new Map<string, CompetitorProfileData>()
 
   for (const item of items as Record<string, unknown>[]) {
@@ -130,4 +131,98 @@ export function extractFollowerCounts(
   }
 
   return counts
+}
+
+/**
+ * Resolve follower counts for all unique handles in stage-1 reels.
+ *
+ * Two-pass strategy:
+ *   1. Extract from stage-1 payload for free (most handles — hashtag
+ *      scraper includes `ownerFollowersCount` for the majority).
+ *   2. For handles where the payload returned nothing (actor version
+ *      inconsistencies, some scrapes omit this field), do a targeted
+ *      batch lookup via `apify/instagram-followers-count-scraper`
+ *      (Actor ID: `7RQ4RlfRihUhflQtJ`, 4.86★, $1.30/1k).
+ *
+ * This is especially important for medical/oncology niches where the
+ * hashtag scraper frequently returns null owner metadata.
+ *
+ * Cost: the fallback only fires for missing handles. Typically 0–5
+ * handles per run → ~$0.01 or less per research run.
+ */
+export async function resolveFollowerCounts(
+  stage1Reels: ScrapedReelRaw[]
+): Promise<Map<string, number>> {
+  // Pass 1 — free, from payload
+  const fromPayload = extractFollowerCounts(stage1Reels)
+
+  // Identify every unique handle that appeared in Stage 1
+  const allHandles = [
+    ...new Set(stage1Reels.map((r) => r.ownerUsername).filter(Boolean)),
+  ] as string[]
+
+  // Handles not resolved from payload — need Apify fallback
+  const unknownHandles = allHandles.filter((h) => !fromPayload.has(h))
+
+  if (unknownHandles.length === 0) {
+    console.log(
+      `[resolveFollowerCounts] all ${allHandles.length} handles resolved from payload (no Apify call needed)`
+    )
+    return fromPayload
+  }
+
+  console.log(
+    `[resolveFollowerCounts] ${fromPayload.size}/${allHandles.length} resolved from payload, ` +
+      `fetching ${unknownHandles.length} missing via Apify: ${unknownHandles.slice(0, 5).join(", ")}${unknownHandles.length > 5 ? "…" : ""}`
+  )
+
+  // Pass 2 — Apify batch lookup for unknowns
+  const fromApify = await batchGetFollowerCounts(unknownHandles)
+  console.log(`[resolveFollowerCounts] Apify resolved ${fromApify.size}/${unknownHandles.length} handles`)
+
+  // Merge — payload takes precedence (more recent / same-session data)
+  return new Map([...fromApify, ...fromPayload])
+}
+
+/**
+ * Batch follower count lookup via `apify/instagram-followers-count-scraper`.
+ * Used only as a fallback when Stage-1 payload didn't include owner follower data.
+ * Internal — callers should use `resolveFollowerCounts` instead.
+ */
+async function batchGetFollowerCounts(
+  handles: string[]
+): Promise<Map<string, number>> {
+  if (handles.length === 0) return new Map()
+
+  try {
+    const client = getApifyClient()
+    const run = await client
+      .actor("apify/instagram-followers-count-scraper")
+      .call({
+        usernames: handles.map((h) => h.replace(/^@/, "")),
+      })
+
+    const { items } = await client
+      .dataset(run.defaultDatasetId)
+      .listItems()
+
+    const result = new Map<string, number>()
+    for (const item of items as Record<string, unknown>[]) {
+      const username = item.username as string | undefined
+      const followersCount = item.followersCount as number | undefined
+      if (username && followersCount && followersCount > 0) {
+        result.set(username, followersCount)
+      }
+    }
+    return result
+  } catch (err) {
+    // Non-fatal — fallback lookup failure means more accounts treated as
+    // "unknown", which triggers the raw-view virality proxy. The pipeline
+    // continues; this is a quality degradation, not a crash.
+    console.error(
+      "[resolveFollowerCounts] Apify batch lookup failed (non-fatal):",
+      err
+    )
+    return new Map()
+  }
 }

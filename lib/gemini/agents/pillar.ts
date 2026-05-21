@@ -9,7 +9,7 @@ import {
   firstText,
   parseJson,
 } from "../client"
-import type { DissectionSummary, ReelFormat } from "@/lib/research/types"
+import type { DissectionSummary, ReelFormat, TrendingAudio } from "@/lib/research/types"
 
 /**
  * Agent 5 — Pillar Builder (Flash, 4096 thinking).
@@ -28,6 +28,12 @@ export type ICPInputForPillar = {
   content_tone: string[]
 }
 
+export type TopicIdea = {
+  title: string
+  /** "As a [format]: [how to execute this specifically]" */
+  format_note: string
+}
+
 export type PillarOutput = {
   name: string
   purpose: string
@@ -35,7 +41,7 @@ export type PillarOutput = {
   best_hook_types: string[]
   emotion_target: string
   cta_type: "follow" | "save" | "comment" | "dm" | "none"
-  topic_ideas: string[]
+  topic_ideas: TopicIdea[]
 }
 
 const SYSTEM_PROMPT = `You are a senior content strategist for Indian Instagram agencies.
@@ -52,8 +58,27 @@ export function buildPillarPrompt(params: {
     [ReelFormat, number]
   >)
     .sort(([, a], [, b]) => b - a)[0]?.[0]
-  const bestHookType = Object.entries(params.summary.hook_virality)
-    .sort(([, a], [, b]) => b - a)[0]?.[0]
+
+  // Top 3 hook archetypes by virality — used to constrain best_hook_types
+  const topHooksByVirality = Object.entries(params.summary.hook_virality)
+    .sort(([, a], [, b]) => b - a)
+    .slice(0, 3)
+    .map(([h, v]) => `${h} (${v.toFixed(2)}× avg)`)
+
+  // Format frequency for richer context ("how often" vs "how well")
+  const formatFrequencyLines = (
+    Object.entries(params.summary.format_frequency ?? {}) as Array<
+      [string, number]
+    >
+  )
+    .sort(([, a], [, b]) => b - a)
+    .map(([f, count]) => {
+      const virality = params.summary.format_virality[f as ReelFormat]
+      return `- ${f}: ${count} reels, ${virality?.toFixed(2) ?? "n/a"}× avg virality`
+    })
+
+  // Trending audio section — only rendered when data is available
+  const trendingAudioLines = formatTrendingAudio(params.summary.trending_audio ?? [])
 
   const l = params.icp.hinglish_level
   const hinglishInstruction =
@@ -72,33 +97,51 @@ Hinglish level: ${params.icp.hinglish_level}/5 — ${hinglishInstruction}
 Tone: ${params.icp.content_tone.join(", ")}
 
 WHAT WORKS IN THIS NICHE (${params.summary.total_reels_analysed} reels analysed):
-- Top hook types: ${params.summary.top_hook_types.join(", ")}
+- Top hook archetypes: ${params.summary.top_hook_archetypes.join(", ")}
+- Hook archetypes by virality (top 3): ${topHooksByVirality.join(" | ")}
 - Best performing format: ${bestFormat ?? "n/a"} (highest avg virality)
 - Top formats overall: ${params.summary.top_formats.join(", ")}
 - Emotions that get engagement: ${params.summary.top_emotions.join(", ")}
 - Content patterns: ${params.summary.top_patterns.join(", ")}
 - CTAs that convert: ${params.summary.top_ctas.join(", ")}
 - Average hook strength in niche: ${params.summary.avg_hook_strength.toFixed(1)}/10
-- Best hook type by virality: ${bestHookType ?? "n/a"}
 
 KEY INSIGHTS FROM TOP PERFORMERS:
 ${params.summary.key_insights.map((i) => `- ${i}`).join("\n")}
 
-FORMAT VIRALITY SCORES:
-${(Object.entries(params.summary.format_virality) as Array<[string, number]>)
-  .sort(([, a], [, b]) => b - a)
-  .map(([f, v]) => `- ${f}: ${v.toFixed(2)}× avg virality`)
-  .join("\n")}
+FORMAT USAGE AND VIRALITY (${params.summary.total_reels_analysed} reels):
+${formatFrequencyLines.join("\n")}
 
-Create EXACTLY 5 content pillars — no more, no less. Each MUST specify:
-- name and purpose
-- recommended_format (the format with highest virality for this pillar's emotion/pattern)
-- best_hook_types (array of 1–2 types that suit this pillar)
-- emotion_target
-- cta_type
-- EXACTLY 5 topic ideas (no more, no less) — topic titles MUST follow this language rule: ${hinglishInstruction}
-- Topics must sound like how the TARGET AUDIENCE actually speaks — not formal English
-- Grounded in the data above — not generic advice`
+FASTEST-GROWING ACCOUNTS PLAYBOOK (what's breaking through RIGHT NOW):
+- Top archetypes: ${params.summary.byCompetitorType.fastest_growing.top_hook_archetypes.join(", ")}
+- Top emotions: ${params.summary.byCompetitorType.fastest_growing.top_emotions.join(", ")}
+- Top formats: ${params.summary.byCompetitorType.fastest_growing.top_formats.join(", ")}
+- Avg virality: ${params.summary.byCompetitorType.fastest_growing.avg_virality.toFixed(2)}× (${params.summary.byCompetitorType.fastest_growing.reel_count} reels)
+
+ESTABLISHED ACCOUNTS PLAYBOOK (what works at scale):
+- Top archetypes: ${params.summary.byCompetitorType.big.top_hook_archetypes.join(", ")}
+- Top emotions: ${params.summary.byCompetitorType.big.top_emotions.join(", ")}
+- Avg virality: ${params.summary.byCompetitorType.big.avg_virality.toFixed(2)}× (${params.summary.byCompetitorType.big.reel_count} reels)
+${trendingAudioLines}
+Create EXACTLY 5 content pillars — no more, no less.
+
+NAMING RULE: Pillar names must be SPECIFIC to this brand and niche.
+Bad: "Educational" | "Motivational" | "Authority"
+Good: "Cancer Screening Explained" | "Kal Ki Thakaan" | "Trainer Ghalat Tha"
+
+Each pillar MUST specify:
+- name: specific to THIS brand — not a generic category
+- purpose: what this pillar does for the audience
+- recommended_format: the format best suited for this pillar's emotion/pattern
+- best_hook_types: 1–2 hook archetypes from the top performers list above ONLY
+- emotion_target: primary emotion this pillar triggers
+- cta_type: what action this pillar drives
+- EXACTLY 3 topic_ideas (objects, not strings):
+  - title: topic title following this language rule: ${hinglishInstruction}
+    Must sound like how the TARGET AUDIENCE actually speaks — not formal English
+  - format_note: "As a [recommended_format]: [concrete execution note — how to open, what to show, what to say]"
+
+Grounded in the data above — not generic advice.`
 }
 
 const responseSchema: Schema = {
@@ -129,9 +172,16 @@ const responseSchema: Schema = {
           },
           topic_ideas: {
             type: Type.ARRAY,
-            items: { type: Type.STRING },
-            minItems: "5",
-            maxItems: "5",
+            minItems: "3",
+            maxItems: "3",
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                format_note: { type: Type.STRING },
+              },
+              required: ["title", "format_note"],
+            },
           },
         },
         required: [
@@ -172,4 +222,33 @@ export async function generatePillars(params: {
 
   const json = parseJson<{ pillars: PillarOutput[] }>(firstText(response))
   return json.pillars ?? []
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+
+/**
+ * Format trending audio for injection into the pillar prompt.
+ * Returns an empty string when no audio data is available so the section
+ * is cleanly omitted rather than showing an empty bullet list.
+ */
+function formatTrendingAudio(tracks: TrendingAudio[]): string {
+  if (tracks.length === 0) return ""
+
+  const lines = tracks
+    .map(
+      (t) =>
+        `- "${t.audio_name}": ${t.reel_count} reels using it, ` +
+        `avg ${t.avg_virality.toFixed(2)}× virality` +
+        (t.max_instagram_usage > 0
+          ? `, ${(t.max_instagram_usage / 1000).toFixed(0)}k+ IG uses`
+          : "")
+    )
+    .join("\n")
+
+  return `\nTRENDING AUDIO IN THIS NICHE RIGHT NOW:
+${lines}
+(Use as timing/format cues — not mandatory audio selections. If a track appears here,
+ reels using it are outperforming average. Worth noting for recommended_format choices.)
+`
 }
