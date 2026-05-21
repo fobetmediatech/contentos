@@ -8,6 +8,7 @@ import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuSeparator,
@@ -48,10 +49,12 @@ export function UserMenu({ fullName, email, agencyName }: UserMenuProps) {
         </div>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" side="top" className="w-56">
-        <DropdownMenuLabel className="font-normal">
-          <p className="truncate text-sm font-medium">{fullName ?? "Account"}</p>
-          <p className="truncate text-xs text-muted-foreground">{email}</p>
-        </DropdownMenuLabel>
+        <DropdownMenuGroup>
+          <DropdownMenuLabel className="font-normal">
+            <p className="truncate text-sm font-medium">{fullName ?? "Account"}</p>
+            <p className="truncate text-xs text-muted-foreground">{email}</p>
+          </DropdownMenuLabel>
+        </DropdownMenuGroup>
         <DropdownMenuSeparator />
         <DropdownMenuItem render={<Link href="/settings" />}>
           <SettingsIcon className="size-4" aria-hidden />

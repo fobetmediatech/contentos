@@ -45,7 +45,15 @@ Rules:
 - Include Hindi/Hinglish variants based on language level
 - Cluster by intent: awareness / pain / aspiration / authority / trend
 - Derive hashtags from actual inputs — do NOT invent
-- Output ONLY valid JSON`
+- Output ONLY valid JSON
+
+CRITICAL — hashtag format:
+- Each hashtag must be a SINGLE word with NO spaces
+- NO # symbol prefix
+- NO special characters (hyphens, underscores between words are NOT allowed)
+- Compound words must be joined with no separator: "careertips" not "career tips" or "career-tips"
+- VALID examples: careertips, jobsearch, linkedinmarketing, naukri, resumetips
+- INVALID examples: "career tips" (space), "#careertips" (# prefix), "career-tips" (hyphen)`
 
 export function buildKeywordPrompt(input: KeywordInput): string {
   return `Convert this real client information into Instagram hashtags for reel research.
@@ -136,20 +144,25 @@ export async function generateHashtags(
   return json.clusters ?? []
 }
 
-/** Flatten clusters into a single hashtag list, deduped, primary first. */
+/**
+ * Flatten clusters into a single hashtag list, deduped, primary first.
+ * Also sanitises each tag — strips #, spaces, and special characters —
+ * so the list is always safe to pass directly to Apify's actor.
+ */
 export function flattenClusters(clusters: HashtagCluster[]): string[] {
   const seen = new Set<string>()
   const out: string[] = []
   for (const c of clusters) {
     for (const tag of [c.primary_hashtag, ...c.secondary_hashtags]) {
-      // Strip #, remove internal spaces (Instagram hashtags have no spaces),
-      // drop any remaining characters that Apify rejects (non-word, non-Devanagari).
+      // Same sanitisation logic as scrape-hashtags.ts sanitizeHashtag:
+      // strip leading #, remove spaces and special chars, lowercase.
       const norm = tag
-        .replace(/^#/, "")
+        .replace(/^#+/, "")
         .replace(/\s+/g, "")
-        .trim()
+        .replace(/[!?.,:;\-+=*&%$#@/\\~^|<>()[\]{}"'`]/g, "")
         .toLowerCase()
-      if (!norm || seen.has(norm)) continue
+        .trim()
+      if (!norm || norm.length > 50 || seen.has(norm)) continue
       seen.add(norm)
       out.push(norm)
     }

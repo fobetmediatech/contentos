@@ -2,7 +2,7 @@ import "server-only"
 
 import { NonRetriableError } from "inngest"
 
-import { resolveFollowerCounts } from "@/lib/apify/get-follower-counts"
+import { fetchCompetitorProfiles } from "@/lib/apify/get-follower-counts"
 import {
   buildNicheCacheKey,
   fetchFromNicheCache,
@@ -27,6 +27,7 @@ import { aggregateDissections } from "@/lib/research/aggregate-dissections"
 import {
   computeCompetitorTier,
   discoverCompetitors,
+  validateIngest,
 } from "@/lib/research/competitor-discovery"
 import {
   extractAndStoreHooks,
@@ -40,6 +41,7 @@ import {
   storeCompetitorProfiles,
   storeKeywordClusters,
   storePillars,
+  updateCompetitorProfileEnrichment,
   updateReelDissections,
   updateResearchStep,
 } from "@/lib/research/storage"
@@ -358,32 +360,16 @@ export const researchNewClient = inngest.createFunction(
       }
 
       // -----------------------------------------------------------------
-      // Step 3: Extract follower counts from stage-1 reels
+      // Step 3: Discover competitors (pure TS)
       //
-      // The hashtag scraper already includes each reel owner's follower
-      // count in the payload (ownerFollowersCount / owner.followersCount /
-      // authorFollowersCount — normalised by scrape-hashtags.ts). We read
-      // it directly from the niche cache, eliminating the separate Apify
-      // actor call entirely.
+      // Per AGENTS.md §C3: real follower counts come from a targeted Apify
+      // profile-scraper call (step 4c below) — NOT from the hashtag-scrape
+      // reel payload which is unreliable across actor versions.
       //
-      // Re-fetches from cache rather than receiving reels as step input —
-      // keeps Inngest step output small.
-      // -----------------------------------------------------------------
-      const followerCounts = (await step.run(
-        "get-follower-counts",
-        async () => {
-          const stage1Reels = await fetchFromNicheCache(cacheKey)
-          // Two-pass resolution: payload extraction (free) + Apify fallback
-          // for handles where the hashtag scraper didn't return owner metadata.
-          const map = await resolveFollowerCounts(stage1Reels)
-          // Maps don't serialise; shape as a plain Record for Inngest state.
-          return Object.fromEntries(map.entries()) as Record<string, number>
-        }
-      )) as Record<string, number>
-      const followerMap = new Map<string, number>(Object.entries(followerCounts))
-
-      // -----------------------------------------------------------------
-      // Step 4: Discover competitors (pure TS)
+      // Discovery therefore runs with an empty follower map and relies on
+      // the view-count / log-normalised fallback virality added in
+      // competitor-discovery.ts. The 10 selected handles are then passed
+      // to fetch-competitor-data (step 4c) for authoritative enrichment.
       //
       // Re-fetches stage-1 reels from niche cache for scoring.
       // Returns a small bundle (handles + metadata, ~10–15 entries).
@@ -432,7 +418,16 @@ export const researchNewClient = inngest.createFunction(
           )
         }
 
-        return discoverCompetitors(stage1Reels, followerMap)
+        // Empty map — real followers fetched in fetch-competitor-data (step 4c).
+        // discoverCompetitors uses log-normalised view fallback when followers = 0.
+        const result = discoverCompetitors(stage1Reels, new Map())
+        // Comprehensive ingest diagnostic — visible in Inngest trace
+        console.log("[ingest-stats]", JSON.stringify(result.stats))
+        console.log(
+          "[discover-competitors] sample profiles:",
+          [...result.topPerforming, ...result.highViews].slice(0, 2)
+        )
+        return result
       })
       const { topPerforming, highViews } = competitorBundle
 
@@ -458,6 +453,93 @@ export const researchNewClient = inngest.createFunction(
         console.log(`[step 4b] storing ${allProfiles.length} competitor profiles`)
         await storeCompetitorProfiles(clientId, agencyId, researchRunId, allProfiles)
         console.log(`[step 4b] competitor profiles stored successfully`)
+      })
+
+      // -----------------------------------------------------------------
+      // Step 4c: Fetch real profile data for the 10 discovered handles
+      //
+      // Per AGENTS.md §C3: uses `apify/instagram-profile-scraper` to get
+      // authoritative follower counts, profile picture URLs, and full names.
+      // Updates the competitor_profiles rows in DB and returns the follower
+      // map so downstream steps (scrape-profiles) can compute virality.
+      //
+      // NOTE: full_name storage requires a DB migration. See storage.ts
+      // updateCompetitorProfileEnrichment for the ALTER TABLE statement.
+      // -----------------------------------------------------------------
+      const enrichedFollowers = (await step.run(
+        "fetch-competitor-data",
+        async () => {
+          const handles = [...topPerforming, ...highViews].map((p) => p.handle)
+          const profileData = await fetchCompetitorProfiles(handles)
+
+          // Persist enriched data (followers + profile_url) to DB.
+          await updateCompetitorProfileEnrichment(clientId, profileData)
+
+          // Return handle → followers as a plain Record for Inngest state.
+          const followerRecord: Record<string, number> = {}
+          for (const [handle, data] of profileData.entries()) {
+            if (data.followers > 0) followerRecord[handle] = data.followers
+          }
+          console.log(
+            `[fetch-competitor-data] ${Object.keys(followerRecord).length}/${handles.length} handles ` +
+              `have follower data (sample: ${Object.entries(followerRecord).slice(0, 3).map(([h, f]) => `${h}=${f.toLocaleString()}`).join(", ")})`
+          )
+          return followerRecord
+        }
+      )) as Record<string, number>
+
+      // Real follower map — used in scrape-profiles for followers_at_scrape
+      // and in validate-ingest for enriched stats.
+      const followerMap = new Map<string, number>(Object.entries(enrichedFollowers))
+
+      // -----------------------------------------------------------------
+      // Step 4d: Post-ingest validation
+      //
+      // Runs AFTER fetch-competitor-data so validation uses real follower
+      // counts, not the view-based fallback from discovery.
+      // Uses NonRetriableError — bad ingest data won't improve on retry.
+      // -----------------------------------------------------------------
+      await step.run("validate-ingest", async () => {
+        const allSelected = [...topPerforming, ...highViews]
+
+        // Rebuild stats using enriched follower data so validation reflects
+        // the real state after the Apify profile fetch.
+        const enrichedStats = {
+          ...competitorBundle.stats,
+          profilesWithFollowerCount: allSelected.filter(
+            (p) => (followerMap.get(p.handle) ?? 0) > 0
+          ).length,
+          // A profile has a usable score when it has real followers (accurate
+          // virality) OR a positive fallback view score from discovery.
+          profilesWithViralityScore: allSelected.filter(
+            (p) => (followerMap.get(p.handle) ?? 0) > 0 || p.avgRecentVirality > 0
+          ).length,
+        }
+
+        const validation = validateIngest(allSelected, enrichedStats)
+
+        if (validation.warnings.length > 0) {
+          console.warn(
+            "[validate-ingest] non-fatal warnings:\n" +
+              validation.warnings.map((w) => `  ⚠ ${w}`).join("\n")
+          )
+        }
+
+        if (!validation.canContinue) {
+          const detail = validation.failures.map((f) => `  ✗ ${f}`).join("\n")
+          console.error(
+            "[validate-ingest] HARD FAILURE — aborting before content pillars:\n" + detail
+          )
+          throw new NonRetriableError(
+            `Research ingest produced unusable data:\n${validation.failures.join("\n")}`
+          )
+        }
+
+        console.log(
+          `[validate-ingest] passed — ${allSelected.length} competitors, ` +
+            `${enrichedStats.profilesWithFollowerCount} with real follower data, ` +
+            `${enrichedStats.reelsWithViews}/${enrichedStats.reelsScraped} reels with views`
+        )
       })
 
       // competitorTypeByHandle — built from the small step output; used
