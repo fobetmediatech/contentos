@@ -2,7 +2,10 @@
  * Minimal ingest-pipeline regression tests.
  *
  * No test runner required — run with:
- *   npx tsx lib/apify/__tests__/ingest-pipeline.test.ts
+ *   npx tsx --conditions react-server --env-file=.env.local lib/apify/__tests__/ingest-pipeline.test.ts
+ *
+ * --conditions react-server  bypasses the server-only guard in scrape-hashtags/get-follower-counts
+ * --env-file=.env.local      satisfies the Apify token check in client.ts (no real API calls made)
  *
  * Exit 0 = all pass.  Exit 1 = first failure.
  */
@@ -11,7 +14,13 @@
 // Adjust the import path if running from a different cwd.
 import { toNum } from "../scrape-hashtags"
 import { extractFollowerCounts } from "../get-follower-counts"
-import { discoverCompetitors, validateIngest } from "../../research/competitor-discovery"
+import {
+  buildNoCompetitorsFoundMessage,
+  buildCompetitorWarningMessage,
+  discoverCompetitors,
+  finalizeCompetitors,
+  validateIngest,
+} from "../../research/competitor-discovery"
 import type { ScrapedReelRaw } from "../../research/types"
 
 // ---------------------------------------------------------------------------
@@ -188,6 +197,69 @@ assert(stats.uniqueOwnersFound === 10,       "stats.uniqueOwnersFound === 10")
 assert(stats.profilesWithFollowerCount === 10, "stats.profilesWithFollowerCount === 10")
 assertEqual(stats.competitorProfilesSelected, 10, "stats.competitorProfilesSelected === 10")
 
+// ── Finalization: references are guaranteed and smaller trusted sets are okay ──
+console.log("\n── finalizeCompetitors ──────────────────────────────────────────")
+const candidateBundle = discoverCompetitors(pool, new Map(), {
+  niche: "Real-estate in Dubai",
+  businessDescription: "Property seller based in Dubai helping families settle",
+})
+const finalized = finalizeCompetitors({
+  discoveredCandidates: candidateBundle.candidates,
+  enrichedFollowers: knownFollowers,
+  validReferenceCreators: [
+    { handle: "viral_a", reelCount: 4, maxViews: 500_000, avgViews: 420_000 },
+    { handle: "coach_ref", reelCount: 3, maxViews: 180_000, avgViews: 120_000 },
+  ],
+  referenceDiagnostics: {
+    requestedHandles: ["viral_a", "coach_ref", "missed_ref"],
+    actorErrorHandles: [],
+    zeroReelHandles: ["missed_ref"],
+  },
+  context: {
+    niche: "Real-estate in Dubai",
+    businessDescription: "Property seller based in Dubai helping families settle",
+  },
+})
+assert(
+  finalized.reference.some((c) => c.handle === "viral_a"),
+  "valid reference discovered in Stage 1 is kept as a finalist"
+)
+assert(
+  finalized.reference.some((c) => c.handle === "coach_ref"),
+  "valid reference outside Stage 1 is still guaranteed into finalists"
+)
+assert(
+  finalized.all.length <= 10 && finalized.all.length > 0,
+  "final competitor set can be smaller than 10 and remain valid"
+)
+const warningText = buildCompetitorWarningMessage(["limited_competitor_set"], 4)
+assert(
+  typeof warningText === "string" && warningText.includes("4 strong competitor"),
+  "warning builder explains partial competitor sets in plain English"
+)
+assertEqual(finalized.diagnostics.referenceRequestedCount, 3, "diagnostics track requested reference creators")
+
+const noCompetitorMessage = buildNoCompetitorsFoundMessage({
+  discoveredCandidateCount: 3,
+  eligibleDiscoveredCount: 0,
+  discoveredRejectedNoVideoCount: 1,
+  discoveredRejectedLowRelevanceCount: 1,
+  discoveredRejectedNegativeSignalCount: 1,
+  discoveredRejectedNoVideoHandles: ["photo_only"],
+  discoveredRejectedLowRelevanceHandles: ["too_generic"],
+  discoveredRejectedNegativeSignalHandles: ["travel_mix"],
+  referenceRequestedCount: 2,
+  validReferenceCount: 0,
+  referenceActorErrorHandles: ["scrape_failed"],
+  referenceZeroReelHandles: ["no_reels"],
+})
+assert(
+  noCompetitorMessage.includes("@no_reels") &&
+    noCompetitorMessage.includes("@scrape_failed") &&
+    noCompetitorMessage.includes("adjacent content"),
+  "failure message explains why competitors were rejected"
+)
+
 // ── Fallback: all follower counts = 0 (follower data missing) ───────────
 console.log("\n── discoverCompetitors (no follower data) ───────────────────────")
 const emptyFollowers = new Map<string, number>()
@@ -231,8 +303,8 @@ const nanStats = { ...s3, profilesWithViralityScore: 0, reelsWithViews: 5 }
 const v3 = validateIngest([nanProfile], nanStats)
 assertEqual(v3.canContinue, false, "NaN score: canContinue = false")
 assert(
-  v3.failures.some((f) => f.includes("NaN or Infinity")),
-  "NaN score: failure message mentions NaN/Infinity"
+  v3.failures.some((f) => f.includes("invalid scores")),
+  "NaN score: failure message mentions invalid scores"
 )
 
 // ── 4d. No follower data → warning only, not failure ──────────────────────

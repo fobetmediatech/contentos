@@ -1,7 +1,5 @@
 import { createClient } from "@/lib/supabase/server"
 import {
-  buildScriptSystemPrompt,
-  buildScriptUserPrompt,
   streamScript,
   type ScriptICP,
   type ScriptPillar,

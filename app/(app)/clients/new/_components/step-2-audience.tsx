@@ -2,7 +2,7 @@
 
 import { zodResolver } from "@hookform/resolvers/zod"
 import { ArrowLeft, ArrowRight } from "lucide-react"
-import { useForm } from "react-hook-form"
+import { useForm, useWatch } from "react-hook-form"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -48,6 +48,14 @@ export function Step2Audience({
       contentTone: defaults.contentTone ?? [],
     },
   })
+  const audienceAgeMin = useWatch({
+    control: form.control,
+    name: "audienceAgeMin",
+  })
+  const audienceAgeMax = useWatch({
+    control: form.control,
+    name: "audienceAgeMax",
+  })
 
   return (
     <Form {...form}>
@@ -58,7 +66,7 @@ export function Step2Audience({
       >
         <div className="space-y-1">
           <h2 className="text-lg font-semibold tracking-tight">
-            Who's the audience?
+            Who&apos;s the audience?
           </h2>
           <p className="text-sm text-muted-foreground">
             Helps the script writer match their voice, age, and language.
@@ -75,10 +83,7 @@ export function Step2Audience({
                 min={13}
                 max={70}
                 step={1}
-                value={[
-                  form.watch("audienceAgeMin"),
-                  form.watch("audienceAgeMax"),
-                ]}
+                value={[audienceAgeMin, audienceAgeMax]}
                 onValueChange={(next) => {
                   if (!Array.isArray(next)) return
                   const [lo, hi] = next as [number, number]
@@ -90,8 +95,7 @@ export function Step2Audience({
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">13</span>
                 <span className="font-medium">
-                  {form.watch("audienceAgeMin")} – {form.watch("audienceAgeMax")}{" "}
-                  years old
+                  {audienceAgeMin} – {audienceAgeMax} years old
                 </span>
                 <span className="text-muted-foreground">70</span>
               </div>
@@ -172,7 +176,7 @@ export function Step2Audience({
                         <div className="space-y-1">
                           <p className="text-sm font-medium">{opt.label}</p>
                           <p className="text-sm italic text-muted-foreground">
-                            "{opt.example}"
+                            &quot;{opt.example}&quot;
                           </p>
                         </div>
                       </label>

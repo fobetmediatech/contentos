@@ -102,13 +102,23 @@ function ProfileGrid({ profiles }: { profiles: CompetitorRow[] }) {
 export function CompetitorsTabs({
   big,
   fastestGrowing,
+  reference,
 }: {
   big: CompetitorRow[]
   fastestGrowing: CompetitorRow[]
+  reference: CompetitorRow[]
 }) {
   return (
-    <Tabs defaultValue="big">
+    <Tabs defaultValue={reference.length > 0 ? "reference" : "big"}>
       <TabsList className="mb-4">
+        <TabsTrigger value="reference">
+          Reference Creators
+          {reference.length > 0 && (
+            <Badge variant="secondary" className="ml-1.5 text-xs">
+              {reference.length}
+            </Badge>
+          )}
+        </TabsTrigger>
         <TabsTrigger value="big">
           Big Competitors
           {big.length > 0 && (
@@ -126,6 +136,16 @@ export function CompetitorsTabs({
           )}
         </TabsTrigger>
       </TabsList>
+
+      <TabsContent value="reference">
+        <div className="space-y-3">
+          <p className="text-xs text-muted-foreground">
+            Creators you or ContentOS explicitly trusted for this client.
+            These anchors are kept when they actively post reels in the niche.
+          </p>
+          <ProfileGrid profiles={reference} />
+        </div>
+      </TabsContent>
 
       <TabsContent value="big">
         <div className="space-y-3">

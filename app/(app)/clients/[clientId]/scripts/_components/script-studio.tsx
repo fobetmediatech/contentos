@@ -58,6 +58,19 @@ function draftKey(clientId: string, scriptId: string | undefined): string {
   return `contentos:draft:${clientId}:${scriptId ?? "new"}`
 }
 
+function readDraft(
+  clientId: string,
+  scriptId: string | undefined
+): { content?: string; topic?: string } | null {
+  if (typeof window === "undefined") return null
+  try {
+    const saved = window.localStorage.getItem(draftKey(clientId, scriptId))
+    return saved ? (JSON.parse(saved) as { content?: string; topic?: string }) : null
+  } catch {
+    return null
+  }
+}
+
 /** ----------------------------------------------------------------
  * ScriptStudio — the full editor. Rendered on /scripts/new and
  * /scripts/[scriptId] after server-fetching pillars + hooks.
@@ -98,11 +111,14 @@ export function ScriptStudio({
   const [hookId, setHookId] = useState<string | null>(
     initialScript?.hookId ?? null
   )
-  const [topic, setTopic] = useState(initialScript?.topic ?? "")
+  const draft = !initialScript ? readDraft(clientId, undefined) : null
+  const [topic, setTopic] = useState(initialScript?.topic ?? draft?.topic ?? "")
   const [audioMood, setAudioMood] = useState<string | null>(
     initialScript?.audioSuggestion ?? null
   )
-  const [content, setContent] = useState(initialScript?.content ?? "")
+  const [content, setContent] = useState(
+    initialScript?.content ?? draft?.content ?? ""
+  )
   const [status, setStatus] = useState(initialScript?.status ?? "draft")
 
   // ── Streaming ────────────────────────────────────────────────────
@@ -126,27 +142,6 @@ export function ScriptStudio({
   const wordCount = countWords(content)
   const estimatedSec = Math.round((wordCount / WPM) * 60)
   const contentChanged = content !== lastSavedContent
-
-  // ── localStorage draft ───────────────────────────────────────────
-  // Restore on mount (if content is empty — don't clobber loaded script)
-  useEffect(() => {
-    if (initialScript) return // editing existing — don't restore draft
-    const key = draftKey(clientId, scriptId)
-    const saved = localStorage.getItem(key)
-    if (saved) {
-      try {
-        const { content: c, topic: t } = JSON.parse(saved) as {
-          content?: string
-          topic?: string
-        }
-        if (c && !content) setContent(c)
-        if (t && !topic) setTopic(t)
-      } catch {
-        // ignore corrupt draft
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
 
   // Persist draft on change
   useEffect(() => {

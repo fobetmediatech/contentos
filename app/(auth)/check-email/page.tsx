@@ -47,7 +47,7 @@ export default async function CheckEmailPage({
           <MailCheck className="size-6" aria-hidden />
         </div>
         <p className="text-sm text-muted-foreground">
-          The link works on this device or any other. Don't see it? Check spam,
+          The link works on this device or any other. Don&apos;t see it? Check spam,
           then try again.
         </p>
       </div>

@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState, useTransition } from "react"
+import { useCallback, useEffect, useState, useTransition } from "react"
 
 import type {
   FullClientValues,
@@ -21,6 +21,16 @@ const STORAGE_KEY = "contentos:client-wizard:v1"
 type Step = 1 | 2 | 3 | 4
 type Draft = Partial<FullClientValues>
 
+function readSavedWizardState(): { step?: Step; draft?: Draft } | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY)
+    return raw ? (JSON.parse(raw) as { step?: Step; draft?: Draft }) : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Top-level wizard state container.
  *
@@ -32,34 +42,16 @@ type Draft = Partial<FullClientValues>
  * rewinds the step counter, leaving the draft intact.
  */
 export function ClientWizard() {
-  const [step, setStep] = useState<Step>(1)
-  const [draft, setDraft] = useState<Draft>({})
+  const savedState = readSavedWizardState()
+  const [step, setStep] = useState<Step>(
+    savedState?.step && savedState.step >= 1 && savedState.step <= 4
+      ? savedState.step
+      : 1
+  )
+  const [draft, setDraft] = useState<Draft>(savedState?.draft ?? {})
   const [pending, startTransition] = useTransition()
-  const hydratedRef = useRef(false)
 
-  // Hydrate from localStorage on mount (client-only).
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY)
-      if (raw) {
-        const parsed = JSON.parse(raw) as { step?: Step; draft?: Draft }
-        if (parsed.draft) setDraft(parsed.draft)
-        if (parsed.step && parsed.step >= 1 && parsed.step <= 4) {
-          setStep(parsed.step)
-        }
-      }
-    } catch {
-      // Ignore corrupted state — start fresh.
-    } finally {
-      hydratedRef.current = true
-    }
-  }, [])
-
-  // Persist whenever draft or step changes — but only after the
-  // initial hydration, otherwise we'd overwrite saved state with the
-  // empty initial values on first render.
-  useEffect(() => {
-    if (!hydratedRef.current) return
     try {
       window.localStorage.setItem(
         STORAGE_KEY,
@@ -220,10 +212,10 @@ function isReadyForReview(
 function BackToStartFallback({ onReset }: { onReset: () => void }) {
   return (
     <div className="rounded-xl border border-dashed bg-card p-8 text-center">
-      <h3 className="text-base font-semibold">Let's start over</h3>
+      <h3 className="text-base font-semibold">Let&apos;s start over</h3>
       <p className="mt-1 text-sm text-muted-foreground">
-        Something's missing from your earlier steps. Go back to the start and
-        we'll walk through it together.
+        Something&apos;s missing from your earlier steps. Go back to the start
+        and we&apos;ll walk through it together.
       </p>
       <button
         type="button"

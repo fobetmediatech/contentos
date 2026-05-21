@@ -116,8 +116,15 @@ export const fullClientSchema = step1Schema
     }
   )
 
+/**
+ * Reused by the overview edit flow so saved client details and the
+ * original onboarding stay on the same validation rules.
+ */
+export const updateClientSchema = fullClientSchema
+
 export type Step1Values = z.infer<typeof step1Schema>
 export type Step2Values = z.infer<typeof step2Schema>
 export type Step3Values = z.infer<typeof step3Schema>
 export type Step4Values = z.infer<typeof step4Schema>
 export type FullClientValues = z.infer<typeof fullClientSchema>
+export type UpdateClientValues = z.infer<typeof updateClientSchema>

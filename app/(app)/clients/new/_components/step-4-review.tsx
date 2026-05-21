@@ -221,7 +221,7 @@ export function Step4Review({
                   How should we start?
                 </h3>
                 <p className="text-sm text-muted-foreground">
-                  Pick "New" if this client doesn't have many reels yet.
+                  Pick &quot;New&quot; if this client doesn&apos;t have many reels yet.
                 </p>
               </div>
               <FormControl>

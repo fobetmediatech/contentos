@@ -26,6 +26,12 @@ export function ResearchFailedCard({
   const router = useRouter()
   const [pending, startTransition] = useTransition()
   const [error, setError] = useState<string | null>(null)
+  const messageLines = (run.error_message ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+  const intro = messageLines[0]
+  const detailLines = messageLines.slice(1)
 
   const onRetry = () => {
     setError(null)
@@ -68,12 +74,23 @@ export function ResearchFailedCard({
             Research couldn&apos;t be completed
           </h2>
           <p className="text-sm text-muted-foreground">
-            {run.error_message ??
+            {intro ||
               "Something went wrong on our end. Give it another try in a few minutes."}
           </p>
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
+        {detailLines.length > 0 ? (
+          <div className="rounded-lg border bg-muted/30 p-4 text-sm text-muted-foreground">
+            <ul className="space-y-2">
+              {detailLines.map((line) => (
+                <li key={line}>
+                  {line.startsWith("- ") ? line.slice(2) : line}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         {error ? (
           <Alert variant="destructive" role="alert">
             <AlertDescription>{error}</AlertDescription>

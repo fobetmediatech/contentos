@@ -3,7 +3,6 @@ import { Users } from "lucide-react"
 import { EmptyState } from "@/components/shared/empty-state"
 import {
   getCompetitorProfiles,
-  type CompetitorRow,
 } from "@/lib/research/display-queries"
 import { ResearchSection } from "./research-section"
 import { CompetitorsTabs } from "./competitors-tabs"
@@ -19,6 +18,7 @@ export async function CompetitorsSection({ clientId }: { clientId: string }) {
   const fastestGrowing = profiles.filter(
     (p) => p.competitor_type === "fastest_growing"
   )
+  const reference = profiles.filter((p) => p.competitor_type === "reference")
 
   return (
     <ResearchSection
@@ -34,7 +34,11 @@ export async function CompetitorsSection({ clientId }: { clientId: string }) {
           action={null}
         />
       ) : (
-        <CompetitorsTabs big={big} fastestGrowing={fastestGrowing} />
+        <CompetitorsTabs
+          big={big}
+          fastestGrowing={fastestGrowing}
+          reference={reference}
+        />
       )}
     </ResearchSection>
   )

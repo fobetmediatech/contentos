@@ -21,6 +21,7 @@ export type ResearchRunRow = {
   reels_analysed: number | null
   pillars_created: number | null
   hooks_added: number | null
+  competitors_found: number | null
   error_message: string | null
   started_at: string | null
   completed_at: string | null
@@ -38,7 +39,7 @@ export const getLatestResearchRun = cache(
     const { data, error } = await supabase
       .from("research_runs")
       .select(
-        "id, client_id, agency_id, run_type, status, current_step, steps_json, reels_scraped, reels_analysed, pillars_created, hooks_added, error_message, started_at, completed_at, created_at"
+        "id, client_id, agency_id, run_type, status, current_step, steps_json, reels_scraped, reels_analysed, pillars_created, hooks_added, competitors_found, error_message, started_at, completed_at, created_at"
       )
       .eq("client_id", clientId)
       .order("created_at", { ascending: false })

@@ -118,18 +118,28 @@ export type ReferenceCreatorResult = {
   reelsMap: Map<string, ScrapedReelRaw[]>
   actorErrorCount: number   // actor threw → likely transient
   zeroResultCount: number   // actor ran, returned 0 → might be structural
+  actorErrorHandles: string[]
+  zeroResultHandles: string[]
 }
 
 export async function scrapeReferenceCreators(
   handles: string[]
 ): Promise<ReferenceCreatorResult> {
   if (handles.length === 0) {
-    return { reelsMap: new Map(), actorErrorCount: 0, zeroResultCount: 0 }
+    return {
+      reelsMap: new Map(),
+      actorErrorCount: 0,
+      zeroResultCount: 0,
+      actorErrorHandles: [],
+      zeroResultHandles: [],
+    }
   }
 
   const reelsMap = new Map<string, ScrapedReelRaw[]>()
   let actorErrorCount = 0
   let zeroResultCount = 0
+  const actorErrorHandles: string[] = []
+  const zeroResultHandles: string[] = []
 
   for (const handle of handles) {
     const cleanHandle = handle.replace(/^@/, "")
@@ -140,6 +150,7 @@ export async function scrapeReferenceCreators(
         // Actor ran successfully but found nothing — could be no Reels on the account,
         // or a soft Instagram block that returns an empty result set instead of an error.
         zeroResultCount++
+        zeroResultHandles.push(cleanHandle)
         console.warn(
           `[scrape-profiles] reference creator @${cleanHandle}: actor returned 0 reels ` +
           `(account may have no public Reels, or Instagram soft-blocked the scraper)`
@@ -151,6 +162,7 @@ export async function scrapeReferenceCreators(
       // Actor threw — most likely causes: insufficient Apify credits on this token,
       // Instagram rate-limiting, or the account is private/deleted.
       actorErrorCount++
+      actorErrorHandles.push(cleanHandle)
       console.error(
         `[scrape-profiles] reference creator @${cleanHandle} actor FAILED (will continue):`,
         err
@@ -166,7 +178,13 @@ export async function scrapeReferenceCreators(
     `${handles.length - actorErrorCount - zeroResultCount} with reels`
   )
 
-  return { reelsMap, actorErrorCount, zeroResultCount }
+  return {
+    reelsMap,
+    actorErrorCount,
+    zeroResultCount,
+    actorErrorHandles,
+    zeroResultHandles,
+  }
 }
 
 // ---------------------------------------------------------------------------

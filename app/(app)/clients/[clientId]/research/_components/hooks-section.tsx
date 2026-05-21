@@ -1,6 +1,5 @@
 import { Zap } from "lucide-react"
 
-import { Badge } from "@/components/ui/badge"
 import { EmptyState } from "@/components/shared/empty-state"
 import { getHookBankForClient, type HookRow } from "@/lib/research/display-queries"
 import { ResearchSection } from "./research-section"

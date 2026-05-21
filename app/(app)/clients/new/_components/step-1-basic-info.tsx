@@ -3,7 +3,7 @@
 import { zodResolver } from "@hookform/resolvers/zod"
 import { ArrowRight } from "lucide-react"
 import Link from "next/link"
-import { useForm } from "react-hook-form"
+import { useForm, useWatch } from "react-hook-form"
 
 import { Button } from "@/components/ui/button"
 import {
@@ -44,8 +44,8 @@ export function Step1BasicInfo({ defaults, onSubmit, disabled }: Step1Props) {
       businessDescription: defaults.businessDescription ?? "",
     },
   })
-
-  const showCustomNiche = form.watch("niche") === "Other"
+  const nicheValue = useWatch({ control: form.control, name: "niche" })
+  const showCustomNiche = nicheValue === "Other"
 
   return (
     <Form {...form}>

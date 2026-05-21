@@ -27,9 +27,6 @@ export const getCompetitorProfiles = cache(
         "id, handle, followers, competitor_type, avg_recent_virality, recent_reel_count"
       )
       .eq("client_id", clientId)
-      // Only show the two discovered categories — reference creators are
-      // a scraping hint only and are not stored in competitor_profiles.
-      .in("competitor_type", ["big", "fastest_growing"])
       .order("competitor_type")
       .order("followers", { ascending: false })
     return (data ?? []) as CompetitorRow[]

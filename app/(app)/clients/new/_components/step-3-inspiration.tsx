@@ -92,7 +92,7 @@ export function Step3Inspiration({
                 />
               </FormControl>
               <FormDescription>
-                We'll steer the script writer away from these voices.
+                We&apos;ll steer the script writer away from these voices.
               </FormDescription>
               <FormMessage />
             </FormItem>

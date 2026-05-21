@@ -34,7 +34,10 @@ export function useResearchProgress(
   // Hold latest run in a ref so the polling interval always sees current
   // state without needing to be a dep (avoids recreating the interval).
   const runRef = useRef<ResearchRunRow | null>(initial)
-  runRef.current = run
+
+  useEffect(() => {
+    runRef.current = run
+  }, [run])
 
   useEffect(() => {
     if (!initial?.id) {

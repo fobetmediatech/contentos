@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation"
 import { useState, useTransition } from "react"
 import { toast } from "sonner"
 
+import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
 import {
@@ -39,10 +40,11 @@ export function ResearchCompleteCard({
   const [pending, startTransition] = useTransition()
 
   const stats: Array<{ label: string; value: string }> = [
+    { label: "Competitors", value: `${run.competitors_found ?? 0}` },
     { label: "Reels analysed", value: `${run.reels_analysed ?? 0}` },
     { label: "Pillars created", value: `${run.pillars_created ?? 0}` },
     { label: "Hooks added",     value: `${run.hooks_added ?? 0}` },
-    { label: "Reels scraped",   value: `${run.reels_scraped ?? 0}` },
+    { label: "Reels scraped", value: `${run.reels_scraped ?? 0}` },
   ]
 
   function handleRerun() {
@@ -152,8 +154,14 @@ export function ResearchCompleteCard({
         </div>
       </CardHeader>
 
-      <CardContent>
-        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <CardContent className="space-y-4">
+        {run.status === "failed_partial" && run.error_message ? (
+          <Alert>
+            <AlertDescription>{run.error_message}</AlertDescription>
+          </Alert>
+        ) : null}
+
+        <dl className="grid grid-cols-2 gap-4 sm:grid-cols-5">
           {stats.map((s) => (
             <div key={s.label} className="space-y-1">
               <dd className="text-2xl font-semibold tracking-tight">

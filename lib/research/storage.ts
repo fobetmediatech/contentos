@@ -115,6 +115,7 @@ export async function markResearchComplete(
     pillarsCreated: number
     hooksAdded: number
     competitorsFound: number
+    warningMessage?: string | null
   }
 ): Promise<void> {
   const supabase = createAdminClient()
@@ -124,8 +125,10 @@ export async function markResearchComplete(
     status: "complete",
   }))
 
+  const finalStatus = summary.warningMessage ? "failed_partial" : "complete"
+
   await supabase.from("research_runs").update({
-    status: "complete",
+    status: finalStatus,
     current_step: null,
     steps_json: completedSteps,
     completed_at: new Date().toISOString(),
@@ -134,11 +137,12 @@ export async function markResearchComplete(
     pillars_created: summary.pillarsCreated,
     hooks_added: summary.hooksAdded,
     competitors_found: summary.competitorsFound,
+    error_message: summary.warningMessage ?? null,
   }).eq("id", researchRunId)
 
   await supabase
     .from("clients")
-    .update({ research_status: "complete" })
+    .update({ research_status: finalStatus })
     .eq("id", clientId)
 }
 

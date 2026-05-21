@@ -199,7 +199,7 @@ async function checkInngest() {
   if (!eventKey || !signingKey) { fail("Inngest", "Missing keys"); return }
 
   try {
-    const res = await fetch("http://localhost:8288/", { signal: AbortSignal.timeout(2000) })
+    await fetch("http://localhost:8288/", { signal: AbortSignal.timeout(2000) })
     pass("Inngest (dev server)", `running on localhost:8288 — event key configured`)
   } catch {
     warn("Inngest", "dev server not running on :8288 (fine in production) — keys configured")

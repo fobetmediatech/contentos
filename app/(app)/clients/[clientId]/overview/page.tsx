@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { getClient } from "@/lib/clients/queries"
 import { HINGLISH_OPTIONS } from "@/lib/clients/types"
+import { EditClientDialog } from "./_components/edit-client-dialog"
 
 export default async function OverviewPage({
   params,
@@ -29,6 +30,10 @@ export default async function OverviewPage({
 
   return (
     <PageContent>
+      <div className="mb-6 flex justify-end">
+        <EditClientDialog client={client} />
+      </div>
+
       <div className="grid gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
           {/* Status-driven primary callout */}

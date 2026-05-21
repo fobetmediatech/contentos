@@ -25,8 +25,11 @@ import { generatePillars } from "@/lib/gemini/agents/pillar"
 import { transcribeReelsParallel } from "@/lib/groq/transcribe"
 import { aggregateDissections } from "@/lib/research/aggregate-dissections"
 import {
+  buildNoCompetitorsFoundMessage,
+  buildCompetitorWarningMessage,
   computeCompetitorTier,
   discoverCompetitors,
+  finalizeCompetitors,
   validateIngest,
 } from "@/lib/research/competitor-discovery"
 import {
@@ -56,84 +59,81 @@ import type {
 } from "@/lib/research/types"
 import { inngest, type ResearchNewClientPayload } from "../client"
 
-/**
- * Derive broad single-word hashtags from the niche name for use as a
- * last-resort scraping fallback when specific hashtags return nothing.
- * e.g. "career counseling" → ["career", "counseling", "reels", "india", "trending"]
- */
 function deriveBroaderHashtags(niche: string): string[] {
   const words = niche
     .toLowerCase()
     .replace(/[^a-z0-9 ]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 2)
-  // High-volume discovery tags common on Indian Instagram reels
-  const discovery = ["reels", "india", "trending"]
-  return [...new Set([...words, ...discovery])].slice(0, 6)
+    .filter((word) => word.length > 2)
+  return [...new Set([...words, "reels", "india", "trending"])].slice(0, 6)
 }
 
-/**
- * Build 2–4 word geo-specific search phrases for Instagram keyword search.
- *
- * Extracts location from the niche string (e.g. "Dubai" from "Real-estate in Dubai")
- * and produces CREATOR-INTENT queries that surface advisor/educator accounts who
- * make Reels — NOT transaction-intent queries like "buy property dubai" which
- * return listing agencies and developer accounts that post photos, not Reels.
- *
- * Creator-intent = searches for advice, tips, guides → finds creators who EXPLAIN
- * Transaction-intent = searches for listings, prices → finds agencies that ADVERTISE
- */
-function buildGeoKeywords(niche: string, painPoints: string[]): string[] {
-  // Extract the niche topic and geo from e.g. "Real-estate in Dubai"
-  const parts = niche.replace(/-/g, " ").split(/\s+in\s+/i)
-  const topic = parts[0]?.trim() ?? niche
+function buildGeoKeywords(params: {
+  niche: string
+  businessDescription: string
+  painPoints: string[]
+  referenceCreators: string[]
+}): string[] {
+  const parts = params.niche.replace(/-/g, " ").split(/\s+in\s+/i)
+  const topic = parts[0]?.trim() ?? params.niche
   const location = parts[1]?.trim() ?? ""
+  const lowerTopic = topic.toLowerCase()
 
-  const keywords: string[] = []
+  const keywords = new Set<string>()
+  const creatorIntents = ["tips", "guide", "advice", "explained", "strategy"]
 
   if (location) {
-    // Creator-intent templates — surface educators/advisors who make Reels
-    keywords.push(`${topic} tips ${location}`.toLowerCase())
-    keywords.push(`${location} ${topic} guide`.toLowerCase())
-    keywords.push(`${topic} advice ${location}`.toLowerCase())
-    keywords.push(`invest ${location}`.toLowerCase())
+    for (const intent of creatorIntents) {
+      keywords.add(`${topic} ${intent} ${location}`.toLowerCase())
+    }
+    keywords.add(`${location} ${topic} expert`.toLowerCase())
+    keywords.add(`${location} ${topic} consultant`.toLowerCase())
   } else {
-    keywords.push(`${topic} tips`.toLowerCase())
-    keywords.push(`${topic} guide`.toLowerCase())
-    keywords.push(`learn ${topic}`.toLowerCase())
-  }
-
-  // Add top pain-point phrases (2–4 words only — these are naturally creator-intent
-  // because they describe the audience's problem, which creators address in Reels)
-  for (const pp of painPoints.slice(0, 3)) {
-    const phrase = pp.trim()
-    const words = phrase.split(/\s+/).length
-    if (words >= 2 && words <= 4) {
-      keywords.push(location ? `${phrase} ${location}`.toLowerCase() : phrase.toLowerCase())
+    for (const intent of creatorIntents) {
+      keywords.add(`${topic} ${intent}`.toLowerCase())
     }
   }
 
-  return [...new Set(keywords)].slice(0, 6)
+  if (
+    lowerTopic.includes("real estate") ||
+    lowerTopic.includes("property") ||
+    params.businessDescription.toLowerCase().includes("property")
+  ) {
+    keywords.add("real estate educator")
+    keywords.add("property broker tips")
+    if (location) {
+      keywords.add(`property investment ${location}`.toLowerCase())
+      keywords.add(`buy home ${location}`.toLowerCase())
+      keywords.add(`${location} property advisor`.toLowerCase())
+      keywords.add(`${location} real estate guide`.toLowerCase())
+    }
+  }
+
+  for (const painPoint of params.painPoints.slice(0, 3)) {
+    const phrase = painPoint.trim()
+    const words = phrase.split(/\s+/).length
+    if (words >= 2 && words <= 5) {
+      keywords.add(
+        location ? `${phrase} ${location}`.toLowerCase() : phrase.toLowerCase()
+      )
+    }
+  }
+
+  for (const handle of params.referenceCreators.slice(0, 3)) {
+    const cleaned = handle.replace(/^@/, "").replace(/[._]/g, " ").trim()
+    if (cleaned.length >= 4) keywords.add(cleaned.toLowerCase())
+  }
+
+  return [...keywords]
+    .filter((keyword) => !/(travel|holiday|tour|vacation|hotel)/.test(keyword))
+    .slice(0, 8)
 }
 
-/**
- * Filter Stage 1 reels to only those mentioning the target location
- * in caption or hashtags. Prevents global accounts (UK, AU, Cyprus etc.)
- * from polluting competitor discovery for geo-specific niches.
- *
- * Falls back to the unfiltered pool if fewer than 10 reels match — avoids
- * over-filtering niches that don't have strong geo-tagging conventions.
- */
-function filterGeoRelevant(
-  reels: ScrapedReelRaw[],
-  niche: string
-): ScrapedReelRaw[] {
-  // Extract location words from niche (e.g. "Dubai", "UAE" from "Real-estate in Dubai")
+function filterGeoRelevant(reels: ScrapedReelRaw[], niche: string): ScrapedReelRaw[] {
   const parts = niche.replace(/-/g, " ").split(/\s+in\s+/i)
   const location = parts[1]?.trim() ?? ""
-  if (!location) return reels // no geo component — don't filter
+  if (!location) return reels
 
-  // Common synonyms / abbreviations for major markets
   const geoSynonyms: Record<string, string[]> = {
     dubai: ["dubai", "dxb", "uae", "emirates", "burj", "palm jumeirah", "marina"],
     mumbai: ["mumbai", "bombay", "bandra", "juhu", "lower parel"],
@@ -146,65 +146,23 @@ function filterGeoRelevant(
   }
   const terms = geoSynonyms[location.toLowerCase()] ?? [location.toLowerCase()]
 
-  const matched = reels.filter((r) => {
-    const text = [
-      r.caption ?? "",
-      ...(r.hashtags ?? []),
-    ].join(" ").toLowerCase()
-    return terms.some((t) => text.includes(t))
+  const matched = reels.filter((reel) => {
+    const text = [reel.caption ?? "", ...(reel.hashtags ?? [])].join(" ").toLowerCase()
+    return terms.some((term) => text.includes(term))
   })
 
-  const MIN = 10
-  if (matched.length >= MIN) {
-    console.log(`[filterGeoRelevant] ${matched.length}/${reels.length} reels match location "${location}"`)
-    return matched
-  }
-
-  console.warn(
-    `[filterGeoRelevant] only ${matched.length} geo-matched reels (< ${MIN}) — ` +
-    `keeping unfiltered pool of ${reels.length} to avoid empty Stage 1`
-  )
-  return reels
+  return matched.length >= 10 ? matched : reels
 }
 
-/**
- * Merge two reel arrays, deduplicating by URL. Second array supplements
- * the first — used to merge hashtag scrape + keyword scrape results.
- */
 function mergeReelsByUrl(
   primary: ScrapedReelRaw[],
   supplement: ScrapedReelRaw[]
 ): ScrapedReelRaw[] {
-  const seen = new Set(primary.map((r) => r.url))
-  const novel = supplement.filter((r) => r.url && !seen.has(r.url))
+  const seen = new Set(primary.map((reel) => reel.url))
+  const novel = supplement.filter((reel) => reel.url && !seen.has(reel.url))
   return [...primary, ...novel]
 }
 
-/**
- * The new-client research pipeline (Phase 1.4 + step-output-size fix).
- *
- * Step output size strategy:
- *   - Stage-1 reels (up to 250 objects) are written to `niche_reel_cache`
- *     by scrapeOrCacheHashtags; subsequent steps re-fetch via
- *     fetchFromNicheCache(cacheKey) so the scrape-hashtags step only
- *     returns { count, cacheKey }.
- *   - Stage-2 reels + transcripts + classifications are written to
- *     `scraped_reels` inside the merged scrape-profiles step, which
- *     returns only { totalReels }.
- *   - Dissections are patched into existing rows via updateReelDissections;
- *     the dissect step returns only { dissected }.
- *   - Aggregate and hook-bank steps call fetchAnalyzedReels() from DB.
- *
- * Architecture fixes preserved:
- *   C1  — no ffmpeg; Gemini gets video URL via fileData
- *   C2  — validate URL expiry before passing to Gemini / Whisper
- *   C3  — batch follower lookup after Stage 1
- *   C4  — pillar agent receives TS-aggregated summary, not raw dissections
- *   C5  — dissect only the top 30 reels by virality (512 thinking budget)
- *   M2  — Stage 2 scrape de-dupes against Stage 1
- *   M3  — reference creators always scraped
- *   M7  — no hashtag post-count validation
- */
 export const researchNewClient = inngest.createFunction(
   {
     id: "research-new-client",
@@ -223,9 +181,6 @@ export const researchNewClient = inngest.createFunction(
     } = event.data as ResearchNewClientPayload
 
     try {
-      // -----------------------------------------------------------------
-      // Step 1: Generate hashtags from intake answers (Flash-Lite)
-      // -----------------------------------------------------------------
       const clusters = await step.run("generate-hashtags", async () => {
         await updateResearchStep(researchRunId, "generating_keywords")
         const result = await generateHashtags(intakeAnswers)
@@ -235,448 +190,280 @@ export const researchNewClient = inngest.createFunction(
 
       const hashtags = flattenClusters(clusters)
 
-      // -----------------------------------------------------------------
-      // Step 2: Stage 1 discovery — keyword-first, hashtag-supplementary
-      //
-      // Priority inversion: the keyword scraper (5.0★, uses Instagram's own
-      // search API) is now the PRIMARY source. The hashtag scraper (2.9★)
-      // is frequently blocked by Instagram and is used only as a supplement.
-      //
-      // Attempt 1 (parallel):
-      //   - Keyword scraper: 60 results across niche + pain keywords (PRIMARY)
-      //   - Hashtag cache: free if same niche was researched this week
-      // Attempt 2 (if pool < 10, parallel):
-      //   - Keyword scraper: 80 results, wider query set
-      //   - Hashtag scraper: top 3 primary hashtags only (live)
-      // Attempt 3 (if pool < 5, parallel):
-      //   - Keyword scraper: 100 results, broadest niche terms
-      //   - Hashtag scraper: single-word broad fallback
-      //
-      // Cache write: only when ≥ 10 reels (prevents thin-result poisoning).
-      // -----------------------------------------------------------------
-      const { stage1Count, cacheKey } = await step.run(
-        "scrape-hashtags",
-        async () => {
-          await updateResearchStep(researchRunId, "finding_competitors")
-          const key = buildNicheCacheKey(niche, hashtags)
+      const { stage1Count, cacheKey } = await step.run("scrape-hashtags", async () => {
+        await updateResearchStep(researchRunId, "finding_competitors")
+        const key = buildNicheCacheKey(niche, hashtags)
+        const searchKeywords = buildGeoKeywords({
+          niche,
+          businessDescription: clientInputs.business_description ?? "",
+          painPoints: clientInputs.pain_points ?? [],
+          referenceCreators: referenceCreators ?? [],
+        })
 
-          // Build geo-specific search keywords from the short niche string
-          // (e.g. "Real-estate in Dubai") and ICP pain points.
-          //
-          // We deliberately do NOT use intakeAnswers.what_they_do here —
-          // that field contains the full business_description (30+ words)
-          // which Instagram's search API rejects or mis-ranks. The niche
-          // string is short, specific, and geo-tagged.
-          //
-          // We also do NOT use cluster primary_hashtags as search terms —
-          // hashtags like "bharatdubai" or "askarealtor" are not readable
-          // search phrases and return irrelevant global content.
-          const searchKeywords = buildGeoKeywords(niche, clientInputs.pain_points ?? [])
+        const [keywordReels, hashtagReels] = await Promise.all([
+          scrapeByKeywords(searchKeywords, 60),
+          scrapeOrCacheHashtags(hashtags, niche, agencyId),
+        ])
 
-          console.log(
-            `[stage1] search keywords: ${searchKeywords.join(" | ")}`
-          )
+        let reels = mergeReelsByUrl(keywordReels, hashtagReels)
+        reels = filterGeoRelevant(reels, niche)
 
-          // Attempt 1 — keyword scraper (PRIMARY, 60 results) in parallel with
-          // hashtag cache (free for repeat niches this week).
-          const [keywordReels, hashtagReels] = await Promise.all([
-            scrapeByKeywords(searchKeywords, 60),
-            scrapeOrCacheHashtags(hashtags, niche, agencyId),
+        if (reels.length >= 10) {
+          await writeToNicheCache(key, reels, agencyId)
+        }
+
+        if (reels.length < 10) {
+          const widerKeywords = [
+            niche,
+            ...searchKeywords,
+            ...deriveBroaderHashtags(niche).slice(0, 2),
+          ].slice(0, 6)
+          const top3Hashtags = hashtags.slice(0, 3)
+          const [kwExtra, htExtra] = await Promise.all([
+            scrapeByKeywords(widerKeywords, 80),
+            scrapeByHashtags(top3Hashtags),
           ])
-
-          console.log(
-            `[stage1] attempt 1 — keyword: ${keywordReels.length} reels | hashtag cache: ${hashtagReels.length} reels`
-          )
-
-          let reels = mergeReelsByUrl(keywordReels, hashtagReels)
-          console.log(`[stage1] merged pool after attempt 1: ${reels.length} reels`)
-
-          // Geographic relevance filter — drop reels with no mention of
-          // the target location in caption or hashtags. Prevents global
-          // real estate / lifestyle accounts from polluting Dubai competitor
-          // discovery when keywords like "property" surface UK/AU/Cyprus accounts.
-          // Falls back to unfiltered pool if geo filter is too aggressive.
-          reels = filterGeoRelevant(reels, niche)
-          console.log(`[stage1] after geo filter: ${reels.length} reels`)
-
+          reels = mergeReelsByUrl(reels, mergeReelsByUrl(kwExtra, htExtra))
           if (reels.length >= 10) {
             await writeToNicheCache(key, reels, agencyId)
           }
-
-          // Attempt 2 — wider keyword pass + top 3 hashtags live scrape.
-          if (reels.length < 10) {
-            const widerKeywords = [
-              niche,
-              ...searchKeywords,
-              ...deriveBroaderHashtags(niche).slice(0, 2),
-            ].slice(0, 6)
-            const top3Hashtags = hashtags.slice(0, 3)
-            console.log(
-              `[stage1] attempt 2 — wider keywords: ${widerKeywords.join(" | ")} + hashtags: ${top3Hashtags.join(", ")}`
-            )
-            const [kwExtra, htExtra] = await Promise.all([
-              scrapeByKeywords(widerKeywords, 80),
-              scrapeByHashtags(top3Hashtags),
-            ])
-            reels = mergeReelsByUrl(reels, mergeReelsByUrl(kwExtra, htExtra))
-            console.log(
-              `[stage1] attempt 2 result: ${reels.length} reels (keyword: ${kwExtra.length}, hashtag: ${htExtra.length})`
-            )
-            if (reels.length >= 10) {
-              await writeToNicheCache(key, reels, agencyId)
-            }
-          }
-
-          // Attempt 3 — broadest possible keyword pass + single-word hashtags.
-          if (reels.length < 5) {
-            const broadKeywords = deriveBroaderHashtags(niche)
-            const broadHashtags = broadKeywords
-            console.log(
-              `[stage1] attempt 3 — broad keywords: ${broadKeywords.join(" | ")}`
-            )
-            const [kwExtra, htExtra] = await Promise.all([
-              scrapeByKeywords(broadKeywords, 100),
-              scrapeByHashtags(broadHashtags),
-            ])
-            reels = mergeReelsByUrl(reels, mergeReelsByUrl(kwExtra, htExtra))
-            console.log(
-              `[stage1] attempt 3 result: ${reels.length} reels (keyword: ${kwExtra.length}, hashtag: ${htExtra.length})`
-            )
-            if (reels.length >= 5) {
-              await writeToNicheCache(key, reels, agencyId)
-            }
-          }
-
-          return { stage1Count: reels.length, cacheKey: key }
         }
-      )
+
+        if (reels.length < 5) {
+          const broadKeywords = deriveBroaderHashtags(niche)
+          const [kwExtra, htExtra] = await Promise.all([
+            scrapeByKeywords(broadKeywords, 100),
+            scrapeByHashtags(broadKeywords),
+          ])
+          reels = mergeReelsByUrl(reels, mergeReelsByUrl(kwExtra, htExtra))
+          if (reels.length >= 5) {
+            await writeToNicheCache(key, reels, agencyId)
+          }
+        }
+
+        return { stage1Count: reels.length, cacheKey: key }
+      })
 
       if (stage1Count < 3) {
         throw new Error(
-          `Only ${stage1Count} reel(s) found after 3 discovery attempts. ` +
-            "Both keyword and hashtag scrapers returned minimal results — " +
-            "Inngest will retry automatically. If this persists, check Apify actor credits."
+          `Only ${stage1Count} reel(s) found after 3 discovery attempts. Both keyword and hashtag scrapers returned minimal results.`
         )
       }
 
-      // -----------------------------------------------------------------
-      // Step 3: Discover competitors (pure TS)
-      //
-      // Per AGENTS.md §C3: real follower counts come from a targeted Apify
-      // profile-scraper call (step 4c below) — NOT from the hashtag-scrape
-      // reel payload which is unreliable across actor versions.
-      //
-      // Discovery therefore runs with an empty follower map and relies on
-      // the view-count / log-normalised fallback virality added in
-      // competitor-discovery.ts. The 10 selected handles are then passed
-      // to fetch-competitor-data (step 4c) for authoritative enrichment.
-      //
-      // Re-fetches stage-1 reels from niche cache for scoring.
-      // Returns a small bundle (handles + metadata, ~10–15 entries).
-      //
-      // Resilience layers:
-      //   1. If cache miss → re-scrape live (rare: first run of the week).
-      //   2. If <5 unique handles found → expand scrape to surface more
-      //      creators (e.g. very narrow niche with thin hashtag coverage).
-      // -----------------------------------------------------------------
-      const competitorBundle = await step.run("discover-competitors", async () => {
-        let stage1Reels = await fetchFromNicheCache(cacheKey)
+      const competitorBundle = await step.run(
+        "discover-competitor-candidates",
+        async () => {
+          let stage1Reels = await fetchFromNicheCache(cacheKey)
+          if (stage1Reels.length === 0) {
+            stage1Reels = await scrapeByHashtags(hashtags)
+          }
 
-        // Layer 1: cache miss — re-scrape live so this step never starves.
-        if (stage1Reels.length === 0) {
-          console.warn(
-            `[discover-competitors] niche cache miss for key "${cacheKey}" — re-scraping live`
+          const uniqueHandles = new Set(
+            stage1Reels.map((reel) => reel.ownerUsername).filter(Boolean)
           )
-          stage1Reels = await scrapeByHashtags(hashtags)
+          if (uniqueHandles.size < 5) {
+            const extra = await scrapeByHashtags(hashtags, 50)
+            const seenUrls = new Set(stage1Reels.map((reel) => reel.url))
+            stage1Reels = [
+              ...stage1Reels,
+              ...extra.filter((reel) => !seenUrls.has(reel.url)),
+            ]
+          }
+
+          return discoverCompetitors(stage1Reels, new Map(), {
+            niche,
+            businessDescription: clientInputs.business_description ?? "",
+          })
         }
+      )
 
-        // Diagnostic: log how many signals we have before discovery.
-        const uniqueHandles = new Set(
-          stage1Reels.map((r) => r.ownerUsername).filter(Boolean)
-        )
-        console.log(
-          `[discover-competitors] stage1: ${stage1Reels.length} reels, ` +
-          `${uniqueHandles.size} unique handles ` +
-          `(sample: ${[...uniqueHandles].slice(0, 5).join(", ")})`
-        )
+      const referenceSummary = (await step.run(
+        "preflight-reference-creators",
+        async () => {
+          const handles = (referenceCreators ?? []).map((handle: string) =>
+            handle.replace(/^@/, "")
+          )
+          if (handles.length === 0) {
+            return {
+              valid: [] as Array<{
+                handle: string
+                reelCount: number
+                maxViews: number
+                avgViews: number
+              }>,
+              actorErrorCount: 0,
+              zeroResultCount: 0,
+            }
+          }
 
-        // Layer 2: too few unique creators → expand the scrape pool.
-        // 5 is the minimum to have any meaningful topPerforming/highViews
-        // selection after deduplication and quality filters.
-        if (uniqueHandles.size < 5) {
-          console.warn(
-            `[discover-competitors] only ${uniqueHandles.size} unique handles — ` +
-            "expanding scrape limit to surface more creators"
-          )
-          const extra = await scrapeByHashtags(hashtags, 50)
-          const seenUrls = new Set(stage1Reels.map((r) => r.url))
-          const novel = extra.filter((r) => !seenUrls.has(r.url))
-          stage1Reels = [...stage1Reels, ...novel]
-          console.log(
-            `[discover-competitors] after expand: ${stage1Reels.length} reels, ` +
-            `${new Set(stage1Reels.map((r) => r.ownerUsername).filter(Boolean)).size} handles`
-          )
+          const result = await scrapeReferenceCreators(handles)
+          const valid = Array.from(result.reelsMap.entries())
+            .map(([handle, reels]) => {
+              const videoReels = reels.filter((reel) => (reel.videoViewCount ?? 0) > 0)
+              const totalViews = videoReels.reduce(
+                (sum, reel) => sum + (reel.videoViewCount ?? 0),
+                0
+              )
+              return {
+                handle,
+                reelCount: reels.length,
+                maxViews: Math.max(
+                  0,
+                  ...videoReels.map((reel) => reel.videoViewCount ?? 0)
+                ),
+                avgViews: videoReels.length > 0 ? totalViews / videoReels.length : 0,
+              }
+            })
+            .filter((summary) => summary.reelCount > 0)
+
+          return {
+            valid,
+            actorErrorCount: result.actorErrorCount,
+            zeroResultCount: result.zeroResultCount,
+            actorErrorHandles: result.actorErrorHandles,
+            zeroResultHandles: result.zeroResultHandles,
+          }
         }
-
-        // Empty map — real followers fetched in fetch-competitor-data (step 4c).
-        // discoverCompetitors uses log-normalised view fallback when followers = 0.
-        const result = discoverCompetitors(stage1Reels, new Map())
-        // Comprehensive ingest diagnostic — visible in Inngest trace
-        console.log("[ingest-stats]", JSON.stringify(result.stats))
-        console.log(
-          "[discover-competitors] sample profiles:",
-          [...result.topPerforming, ...result.highViews].slice(0, 2)
-        )
-        return result
-      })
-      const { topPerforming, highViews } = competitorBundle
-
-      // Guard: if Stage 1 scraped reels but every account turned out to be
-      // a personal/test account with a KNOWN follower count below 1k.
-      // Accounts with unknown follower counts are included by discoverCompetitors
-      // so this only fires when the scraper returned genuinely tiny accounts.
-      if (topPerforming.length + highViews.length === 0) {
-        throw new NonRetriableError(
-          "No usable competitor accounts found in this niche — " +
-          "all scraped accounts had confirmed follower counts below 1,000. " +
-          "Try broader hashtags or a different niche."
-        )
+      )) as {
+        valid: Array<{
+          handle: string
+          reelCount: number
+          maxViews: number
+          avgViews: number
+        }>
+        actorErrorCount: number
+        zeroResultCount: number
+        actorErrorHandles: string[]
+        zeroResultHandles: string[]
       }
 
-      // -----------------------------------------------------------------
-      // Step 4b: Persist the 10 discovered competitor profiles
-      // (big × 5 + fastest_growing × 5 — reference creators are NOT
-      // stored here; they are a scraping hint only)
-      // -----------------------------------------------------------------
-      await step.run("store-competitor-profiles", async () => {
-        const allProfiles = [...topPerforming, ...highViews]
-        console.log(`[step 4b] storing ${allProfiles.length} competitor profiles`)
-        await storeCompetitorProfiles(clientId, agencyId, researchRunId, allProfiles)
-        console.log(`[step 4b] competitor profiles stored successfully`)
-      })
-
-      // -----------------------------------------------------------------
-      // Step 4c: Fetch real profile data for the 10 discovered handles
-      //
-      // Per AGENTS.md §C3: uses `apify/instagram-profile-scraper` to get
-      // authoritative follower counts, profile picture URLs, and full names.
-      // Updates the competitor_profiles rows in DB and returns the follower
-      // map so downstream steps (scrape-profiles) can compute virality.
-      //
-      // NOTE: full_name storage requires a DB migration. See storage.ts
-      // updateCompetitorProfileEnrichment for the ALTER TABLE statement.
-      // -----------------------------------------------------------------
       const enrichedFollowers = (await step.run(
         "fetch-competitor-data",
         async () => {
-          const handles = [...topPerforming, ...highViews].map((p) => p.handle)
+          const handles = [
+            ...new Set([
+              ...competitorBundle.candidates.map((candidate) => candidate.handle),
+              ...referenceSummary.valid.map((reference) => reference.handle),
+            ]),
+          ]
           const profileData = await fetchCompetitorProfiles(handles)
-
-          // Persist enriched data (followers + profile_url) to DB.
-          await updateCompetitorProfileEnrichment(clientId, profileData)
-
-          // Return handle → followers as a plain Record for Inngest state.
           const followerRecord: Record<string, number> = {}
           for (const [handle, data] of profileData.entries()) {
             if (data.followers > 0) followerRecord[handle] = data.followers
           }
-          console.log(
-            `[fetch-competitor-data] ${Object.keys(followerRecord).length}/${handles.length} handles ` +
-              `have follower data (sample: ${Object.entries(followerRecord).slice(0, 3).map(([h, f]) => `${h}=${f.toLocaleString()}`).join(", ")})`
-          )
           return followerRecord
         }
       )) as Record<string, number>
 
-      // Real follower map — used in scrape-profiles for followers_at_scrape
-      // and in validate-ingest for enriched stats.
       const followerMap = new Map<string, number>(Object.entries(enrichedFollowers))
 
-      // -----------------------------------------------------------------
-      // Step 4d: Post-ingest validation
-      //
-      // Runs AFTER fetch-competitor-data so validation uses real follower
-      // counts, not the view-based fallback from discovery.
-      // Uses NonRetriableError — bad ingest data won't improve on retry.
-      // -----------------------------------------------------------------
-      await step.run("validate-ingest", async () => {
-        const allSelected = [...topPerforming, ...highViews]
+      const finalCompetitors = await step.run("select-competitors", async () =>
+        finalizeCompetitors({
+          discoveredCandidates: competitorBundle.candidates,
+          enrichedFollowers: followerMap,
+          validReferenceCreators: referenceSummary.valid,
+          referenceDiagnostics: {
+            requestedHandles: (referenceCreators ?? []).map((handle: string) =>
+              handle.replace(/^@/, "")
+            ),
+            actorErrorHandles: referenceSummary.actorErrorHandles,
+            zeroReelHandles: referenceSummary.zeroResultHandles,
+          },
+          context: {
+            niche,
+            businessDescription: clientInputs.business_description ?? "",
+          },
+        })
+      )
 
-        // Rebuild stats using enriched follower data so validation reflects
-        // the real state after the Apify profile fetch.
+      const allSelected = finalCompetitors.all
+
+      if (allSelected.length === 0) {
+        throw new NonRetriableError(
+          buildNoCompetitorsFoundMessage(finalCompetitors.diagnostics)
+        )
+      }
+
+      await step.run("validate-ingest", async () => {
         const enrichedStats = {
           ...competitorBundle.stats,
+          competitorProfilesSelected: allSelected.length,
           profilesWithFollowerCount: allSelected.filter(
-            (p) => (followerMap.get(p.handle) ?? 0) > 0
+            (candidate) => (followerMap.get(candidate.handle) ?? 0) > 0
           ).length,
-          // A profile has a usable score when it has real followers (accurate
-          // virality) OR a positive fallback view score from discovery.
           profilesWithViralityScore: allSelected.filter(
-            (p) => (followerMap.get(p.handle) ?? 0) > 0 || p.avgRecentVirality > 0
+            (candidate) =>
+              (followerMap.get(candidate.handle) ?? 0) > 0 ||
+              candidate.avgRecentVirality > 0
           ).length,
         }
-
         const validation = validateIngest(allSelected, enrichedStats)
-
-        if (validation.warnings.length > 0) {
-          console.warn(
-            "[validate-ingest] non-fatal warnings:\n" +
-              validation.warnings.map((w) => `  ⚠ ${w}`).join("\n")
-          )
-        }
-
         if (!validation.canContinue) {
-          const detail = validation.failures.map((f) => `  ✗ ${f}`).join("\n")
-          console.error(
-            "[validate-ingest] HARD FAILURE — aborting before content pillars:\n" + detail
-          )
           throw new NonRetriableError(
             `Research ingest produced unusable data:\n${validation.failures.join("\n")}`
           )
         }
+      })
 
-        console.log(
-          `[validate-ingest] passed — ${allSelected.length} competitors, ` +
-            `${enrichedStats.profilesWithFollowerCount} with real follower data, ` +
-            `${enrichedStats.reelsWithViews}/${enrichedStats.reelsScraped} reels with views`
+      await step.run("store-competitor-profiles", async () => {
+        await storeCompetitorProfiles(clientId, agencyId, researchRunId, allSelected)
+        await updateCompetitorProfileEnrichment(
+          clientId,
+          new Map(
+            allSelected.map((candidate) => [
+              candidate.handle,
+              {
+                followers: followerMap.get(candidate.handle) ?? 0,
+                totalPosts: 0,
+                profilePicUrl: null,
+                fullName: null,
+              },
+            ])
+          )
         )
       })
 
-      // competitorTypeByHandle — built from the small step output; used
-      // inside the merged scrape step via closure.
       const competitorTypeByHandle = new Map<string, CompetitorProfile["type"]>(
-        [
-          ...topPerforming.map(
-            (p: CompetitorProfile) => [p.handle, p.type] as const
-          ),
-          ...highViews.map(
-            (p: CompetitorProfile) => [p.handle, p.type] as const
-          ),
-        ]
+        allSelected.map((candidate) => [candidate.handle, candidate.type] as const)
       )
-
-      // competitorTierByHandle — pre-computed server-side so the dissector
-      // receives the tier label without recomputing it from raw numbers.
       const competitorTierByHandle = new Map<string, CompetitorTier>(
-        [...topPerforming, ...highViews].map((p: CompetitorProfile) => [
-          p.handle,
-          computeCompetitorTier(p),
+        allSelected.map((candidate) => [
+          candidate.handle,
+          computeCompetitorTier(candidate),
         ])
       )
 
-      // -----------------------------------------------------------------
-      // Step 5: Scrape profiles + transcribe + classify (merged)
-      //
-      // videoUrl is only valid during the Apify run that produced it —
-      // merging these three operations keeps it in memory for both
-      // Whisper (C1 transcription) and Gemini (C1 classification / C2
-      // URL validation). After classification, all data is written to
-      // `scraped_reels` via insertScrapedReelRows. Step returns only
-      // { totalReels } — no large arrays in Inngest state.
-      // -----------------------------------------------------------------
       const { totalReels } = await step.run("scrape-profiles", async () => {
         await updateResearchStep(researchRunId, "scraping_profiles")
-
-        // 5a. Scrape profiles.
-        // Reference creators (explicitly provided by the agency) are ALWAYS
-        // scraped first — they are vetted, niche-relevant accounts the client
-        // already knows. Stage 1 discovered profiles fill remaining slots.
-        // Re-fetch stage-1 reels for M2 deduplication.
         const stage1Reels = await fetchFromNicheCache(cacheKey)
+        const competitorProfiles: CompetitorProfile[] = allSelected
+        const merged = await scrapeAllCompetitorProfiles(competitorProfiles, stage1Reels)
 
-        // Scrape reference creators first — mandatory, highest-quality signal
-        const refHandles = (referenceCreators ?? []).map((h: string) => h.replace(/^@/, ""))
-        const refResult = refHandles.length > 0
-          ? await scrapeReferenceCreators(refHandles)
-          : { reelsMap: new Map<string, ScrapedReelRaw[]>(), actorErrorCount: 0, zeroResultCount: 0 }
-        const refReelsMap = refResult.reelsMap
-        const refActorsFailed = refResult.actorErrorCount > 0
-
-        const competitorProfiles: CompetitorProfile[] = [
-          ...topPerforming,
-          ...highViews,
-        ]
-        const merged = await scrapeAllCompetitorProfiles(
-          competitorProfiles,
-          stage1Reels
-        )
-
-        // Merge reference creator reels into the pool (tagged as "big" —
-        // they are established, vetted accounts in the target niche).
-        for (const [handle, reels] of refReelsMap) {
-          if (!merged.has(handle)) {
-            merged.set(handle, reels)
-          }
-        }
-
-        // Flatten + tag each reel with competitor_type and id
         const allReels: Array<
           ScrapedReelRaw & { id: string; competitor_type: CompetitorProfile["type"] }
         > = []
         for (const [handle, reels] of merged) {
           const type = competitorTypeByHandle.get(handle) ?? "big"
-          for (const r of reels) {
-            allReels.push({ ...r, id: r.url, competitor_type: type })
+          for (const reel of reels) {
+            allReels.push({ ...reel, id: reel.url, competitor_type: type })
           }
         }
 
-        // Log per-source breakdown for diagnostics — helps distinguish
-        // "competitor accounts have no Reels" from "reference creators also failed".
-        const competitorHandleSet = new Set(competitorProfiles.map((p) => p.handle))
-        const competitorReelCount = allReels.filter((r) =>
-          competitorHandleSet.has(r.ownerUsername)
-        ).length
-        const referenceReelCount = allReels.filter(
-          (r) => !competitorHandleSet.has(r.ownerUsername)
-        ).length
-        console.log(
-          `[step 5a] ${competitorReelCount} reels from ${competitorProfiles.length} competitor profiles | ` +
-          `${referenceReelCount} reels from ${refHandles.length} reference creator(s) | ` +
-          `total: ${allReels.length}`
-        )
-
-        // Guard: if every per-profile scrape returned 0, the pipeline cannot
-        // continue (nothing to transcribe, classify, or dissect).
-        // Distinguish structural (photo-only niche) from transient (rate limit).
         if (allReels.length === 0) {
-          // Structural check: Stage 1 has posts for competitor handles but none
-          // have a videoUrl → these are photo-only accounts. Retrying won't help.
           const anyVideoInStage1 = stage1Reels.some(
-            (r) => competitorHandleSet.has(r.ownerUsername) && !!r.videoUrl
+            (reel) =>
+              competitorProfiles.some((profile) => profile.handle === reel.ownerUsername) &&
+              !!reel.videoUrl
           )
-          const competitorsArePhotoOnly = !anyVideoInStage1 && stage1Reels.length > 0
 
-          // If any reference creator actor THREW (vs. returning 0 cleanly),
-          // the failure is transient (rate limit, credit exhaustion, Instagram block).
-          // Do NOT make this NonRetriable — the actor could succeed on retry.
-          if (refActorsFailed) {
-            throw new Error(
-              `Reference creator Apify actor(s) failed for: ${refHandles.join(", ")}. ` +
-              `This is likely a rate-limit or credit issue — check Apify logs. Will retry.`
-            )
-          }
-
-          if (competitorsArePhotoOnly) {
-            // Structural: all discovered competitors are photo-only AND reference
-            // creators also returned 0 (actors ran cleanly, accounts have no Reels).
-            // Retrying will burn Apify credits without helping.
+          if (!anyVideoInStage1 && stage1Reels.length > 0) {
             throw new NonRetriableError(
-              `All ${competitorProfiles.length} discovered competitor accounts appear to be ` +
-              `photo/carousel-only (no Instagram Reels found in Stage 1 or Stage 2 data). ` +
-              `This niche predominantly uses photo posts rather than Reels. ` +
-              (refHandles.length > 0
-                ? `Reference creators (${refHandles.slice(0, 3).join(", ")}) also returned 0 Reels — ` +
-                  `verify these handles actively post Reels (check their Instagram profile → Reels tab). `
-                : `No reference creators were provided. `) +
-              `To fix: add handles of creators who post Reels in this niche (educators/advisors, not listing accounts).`
+              `All ${competitorProfiles.length} selected competitors appear to be photo-first accounts with no usable reels.`
             )
           }
 
-          // Generic transient failure — Apify rate-limited or profiles temporarily private.
           throw new Error(
-            `Scraped 0 reels from ${competitorProfiles.length} competitor profile(s) ` +
-            `and ${refHandles.length} reference creator(s). ` +
-            `Apify may be rate-limited or all profiles are private. Will retry.`
+            `Scraped 0 reels from ${competitorProfiles.length} selected competitor profile(s).`
           )
         }
 
@@ -690,16 +477,8 @@ export const researchNewClient = inngest.createFunction(
           },
         })
 
-        // 5b. Validate video URLs (C2 — drop expired CDN tokens)
         const validReels = await filterValidVideoUrls(allReels)
-        console.log(
-          `[step 5b] URL validation: ${allReels.length} scraped → ${validReels.length} valid video URLs`
-        )
 
-        // 5c. Transcribe (caption-first for validReels, Whisper turbo fallback)
-        // Niche + pain points are injected into the Whisper prompt as domain
-        // vocab hints — significantly improves accuracy for specialist niches
-        // (oncology terms, fitness jargon, financial terminology, etc.)
         await updateResearchStep(researchRunId, "reading_reels", {
           reelsScraped: allReels.length,
         })
@@ -708,114 +487,73 @@ export const researchNewClient = inngest.createFunction(
           niche: clientInputs.niche,
           painPoints: clientInputs.pain_points,
         })
-        console.log(
-          `[step 5c] transcriptMap has ${transcriptMap.size} entries from Whisper/caption`
-        )
 
-        // 5d. Classify (Gemini video URL — C1)
         await updateResearchStep(researchRunId, "classifying_reels", {
           reelsScraped: allReels.length,
         })
         const classifiable = validReels
-          .map((r) => ({
-            id: r.id,
-            url: r.url,
-            videoUrl: r.videoUrl,
-            transcript: transcriptMap.get(r.id)?.text ?? "",
+          .map((reel) => ({
+            id: reel.id,
+            url: reel.url,
+            videoUrl: reel.videoUrl,
+            transcript: transcriptMap.get(reel.id)?.text ?? "",
           }))
-          .filter((r) => r.transcript.length > 0)
+          .filter((reel) => reel.transcript.length > 0)
         const classificationMap = await classifyReelsBatch(classifiable)
 
-        // 5e. Write all rows to DB.
-        // Caption fallback: reels that failed URL validation (expired CDN link)
-        // but have a substantive caption (>50 chars) are still stored with a
-        // transcript so the dissect step can process them. 50 chars filters
-        // pure emoji/hashtag spam while preserving real captions.
-        const rows = allReels.map((r) => {
-          const whisperResult = transcriptMap.get(r.id)
+        const rows = allReels.map((reel) => {
+          const whisperResult = transcriptMap.get(reel.id)
           const captionFallback =
-            !whisperResult && r.caption && r.caption.trim().length > 50
-              ? { text: r.caption.trim(), source: "caption" as const }
+            !whisperResult && reel.caption && reel.caption.trim().length > 50
+              ? { text: reel.caption.trim(), source: "caption" as const }
               : null
+
           return {
-            reel: r,
-            competitorType: r.competitor_type,
-            followers: followerMap.get(r.ownerUsername) ?? 0,
+            reel,
+            competitorType: reel.competitor_type,
+            followers: followerMap.get(reel.ownerUsername) ?? 0,
             transcript: whisperResult ?? captionFallback,
-            classification: classificationMap.get(r.id) ?? null,
+            classification: classificationMap.get(reel.id) ?? null,
           }
         })
-        const withTranscript = rows.filter((r) => r.transcript !== null).length
-        console.log(
-          `[step 5e] ${rows.length} rows total, ${withTranscript} with transcript ` +
-            `(${rows.length - withTranscript} no transcript — will not be dissected)`
-        )
-        await insertScrapedReelRows(clientId, agencyId, researchRunId, rows)
-        console.log(`[step 5e] insertScrapedReelRows complete`)
 
+        await insertScrapedReelRows(clientId, agencyId, researchRunId, rows)
         return { totalReels: allReels.length }
       })
 
-      // -----------------------------------------------------------------
-      // Step 6: Dissect top 30 reels by virality (C5)
-      //
-      // Fetches sorted candidates from DB — no large step inputs.
-      // Patches dissection column via updateReelDissections.
-      // Returns only { dissected }.
-      // -----------------------------------------------------------------
       const { dissected } = await step.run("dissect-reels", async () => {
         await updateResearchStep(researchRunId, "analysing_reels")
 
         const reelsForDissection = await fetchReelsForDissection(researchRunId)
-        console.log(
-          `[step 6] fetchReelsForDissection returned ${reelsForDissection.length} reels (taking top 30)`
-        )
-        // Already sorted by virality_score desc; take top 30 (C5)
         const top30 = reelsForDissection.slice(0, 30)
-
-        // 6a. Scrape top comments for the top 10 reels by virality.
-        // Comments = highest-signal evidence of what viewers responded to.
-        // Skipped for reels with high comment/like ratio (likely funnel reels
-        // where comments are conversion responses, not organic sentiment).
-        // Non-fatal: if actor fails, topComments is {} and dissection continues.
         const top10ForComments = top30
           .slice(0, 10)
-          .filter((r) => {
-            // Pre-filter likely funnel reels (> 5% comment/like ratio)
-            const ratio = r.likes > 0 ? r.comments / r.likes : 0
+          .filter((reel) => {
+            const ratio = reel.likes > 0 ? reel.comments / reel.likes : 0
             return ratio <= 0.05
           })
-          .map((r) => r.instagramUrl)
+          .map((reel) => reel.instagramUrl)
 
         const commentsMap = await scrapeTopComments(top10ForComments)
-        console.log(
-          `[step 6a] scraped comments for ${commentsMap.size}/${top10ForComments.length} reels`
-        )
-
-        const inputs = top30.map((r) => ({
-          id: r.instagramUrl,
-          transcript: r.transcript,
-          format: (r.format ?? "unknown") as ReelFormat,
-          virality_score: r.viralityScore,
-          views: r.views,
-          likes: r.likes,
-          comments: r.comments,
-          saves: r.saves,
-          audio_name: r.audioName,
-          caption: r.caption,
-          creator_handle: r.creatorHandle,
-          competitor_type: r.competitorType as CompetitorType,
-          // Pre-computed tier — the dissector uses this as context without
-          // recomputing it from raw numbers (which it wouldn't have anyway).
-          competitor_tier: (competitorTierByHandle.get(r.creatorHandle) ??
+        const inputs = top30.map((reel) => ({
+          id: reel.instagramUrl,
+          transcript: reel.transcript,
+          format: (reel.format ?? "unknown") as ReelFormat,
+          virality_score: reel.viralityScore,
+          views: reel.views,
+          likes: reel.likes,
+          comments: reel.comments,
+          saves: reel.saves,
+          audio_name: reel.audioName,
+          caption: reel.caption,
+          creator_handle: reel.creatorHandle,
+          competitor_type: reel.competitorType as CompetitorType,
+          competitor_tier: (competitorTierByHandle.get(reel.creatorHandle) ??
             "on_pace") as CompetitorTier,
-          // Top comments by likes — evidence of what emotionally resonated.
-          // Empty array for reels where comment scrape wasn't run or failed.
-          topComments: commentsMap.get(r.instagramUrl) ?? [],
+          topComments: commentsMap.get(reel.instagramUrl) ?? [],
         }))
 
         const out = await dissectReelsBatch(inputs)
-        // out is Map<instagramUrl, ReelDissection>; matches by instagram_url in DB
         await updateReelDissections(researchRunId, out)
 
         await updateResearchStep(researchRunId, "analysing_reels", {
@@ -828,70 +566,39 @@ export const researchNewClient = inngest.createFunction(
         return { dissected: out.size }
       })
 
-      // Guard: if every reel lacked a transcript AND a usable caption,
-      // the dissect step produces an empty map and the pillar agent will
-      // hallucinate from an empty summary. Non-retriable — retrying the
-      // same reels won't produce transcripts that don't exist.
       if (dissected === 0) {
         throw new NonRetriableError(
-          "Zero reels were dissected — all scraped reels lacked valid transcripts " +
-          "and video URLs. Cannot generate meaningful content pillars without " +
-          "content analysis. Check that the Apify actor returns video URLs and " +
-          "that Groq / Gemini credentials are correct."
+          "Zero reels were dissected — all scraped reels lacked valid transcripts and video URLs."
         )
       }
 
-      // -----------------------------------------------------------------
-      // Step 7: Aggregate dissections (pure TS — C4)
-      //
-      // Fetches from DB — no large step inputs.
-      // Returns a ~2k-token summary for the pillar agent.
-      // -----------------------------------------------------------------
       const summary = await step.run("aggregate-dissections", async () => {
-        // Fetch dissected reels (for hook/format/emotion aggregation) and
-        // all reel audio data (for trending audio) in parallel.
         const [analyzedReels, audioData] = await Promise.all([
           fetchAnalyzedReels(researchRunId),
           fetchReelsAudioData(researchRunId),
         ])
 
-        const dissectionList = analyzedReels.map((r) => ({
-          ...r.dissection,
-          format: r.format as ReelFormat | undefined,
-          virality_score: r.viralityScore,
-          competitor_type: r.competitorType as CompetitorType,
+        const dissectionList = analyzedReels.map((reel) => ({
+          ...reel.dissection,
+          format: reel.format as ReelFormat | undefined,
+          virality_score: reel.viralityScore,
+          competitor_type: reel.competitorType as CompetitorType,
         }))
         const baseSummary = aggregateDissections(dissectionList)
-
-        // Trending audio — zero extra API cost, derived from audio_name/
-        // audio_uses columns already stored in scraped_reels.
-        const trending_audio = computeTrendingAudio(audioData)
-        console.log(
-          `[step 7] trending audio: ${trending_audio.length} tracks identified ` +
-            (trending_audio.length > 0
-              ? `(top: "${trending_audio[0].audio_name}", ${trending_audio[0].avg_virality.toFixed(2)}× avg virality)`
-              : "(no trackable audio found)")
-        )
-
-        return { ...baseSummary, trending_audio }
+        return {
+          ...baseSummary,
+          trending_audio: computeTrendingAudio(audioData),
+        }
       })
 
-      // -----------------------------------------------------------------
-      // Step 8: Extract hooks → embed → store
-      //
-      // Fetches from DB — no large step inputs.
-      // -----------------------------------------------------------------
       const hookCount = await step.run("build-hook-bank", async () => {
         await updateResearchStep(researchRunId, "building_hooks")
         const analyzedReels = await fetchAnalyzedReels(researchRunId)
-        const hooks = analyzedReels.map((r) => ({
-          hook_text: r.dissection.hook.text,
-          // Store archetype as hook_type — hook_bank.hook_type is a text column
-          // so it accepts both old 7-type HookType values and new archetypes.
-          // The old HookType import is kept for the hook-classifier agent path.
-          hook_type: r.dissection.hook.primary_archetype as unknown as HookType,
+        const hooks = analyzedReels.map((reel) => ({
+          hook_text: reel.dissection.hook.text,
+          hook_type: reel.dissection.hook.primary_archetype as unknown as HookType,
           niche,
-          strength: r.dissection.hook.strength,
+          strength: reel.dissection.hook.strength,
         }))
         const result = await extractAndStoreHooks(agencyId, clientId, hooks)
         await updateResearchStep(researchRunId, "building_hooks", {
@@ -900,25 +607,14 @@ export const researchNewClient = inngest.createFunction(
         return result.inserted
       })
 
-      // -----------------------------------------------------------------
-      // Step 9: Generate ICP (Flash-Lite)
-      //
-      // Runs after aggregation so confirmed_emotions and
-      // confirmed_hook_archetypes from real competitor data can be
-      // injected — the ICP is no longer purely intake-form-derived.
-      // -----------------------------------------------------------------
       const icp = await step.run("generate-icp", async () => {
         const result = await generateICP({
           ...clientInputs,
-          // Research-confirmed signals from competitor analysis.
-          // If summary is empty (first-run edge case), these will be [].
           confirmed_emotions: summary.top_emotions,
           confirmed_hook_archetypes: summary.top_hook_archetypes,
         })
         await storeClientICP(clientId, {
           ...result,
-          // Preserve raw wizard inputs alongside the LLM-derived ICP
-          // so the script writer has everything in one place.
           audience_age_range: clientInputs.audience_age_range,
           pain_points: clientInputs.pain_points,
           hinglish_level: clientInputs.hinglish_level,
@@ -929,9 +625,6 @@ export const researchNewClient = inngest.createFunction(
         return result
       })
 
-      // -----------------------------------------------------------------
-      // Step 10: Build pillars from the aggregated summary (C4)
-      // -----------------------------------------------------------------
       const pillars = await step.run("generate-pillars", async () => {
         await updateResearchStep(researchRunId, "building_pillars")
         const result = await generatePillars({
@@ -947,24 +640,23 @@ export const researchNewClient = inngest.createFunction(
         return result
       })
 
-      // -----------------------------------------------------------------
-      // Step 11: Mark research complete
-      // -----------------------------------------------------------------
       await step.run("complete", async () => {
+        const warningMessage = buildCompetitorWarningMessage(
+          finalCompetitors.warnings,
+          allSelected.length
+        )
         await markResearchComplete(researchRunId, clientId, {
           reelsScraped: totalReels,
           reelsAnalysed: dissected,
           pillarsCreated: pillars.length,
           hooksAdded: hookCount,
-          competitorsFound: topPerforming.length + highViews.length,
+          competitorsFound: allSelected.length,
+          warningMessage,
         })
-
-        // Phase 1.4 wires email next; Phase 1.8 wires the in-app notif.
-        // TODO: await sendResearchCompleteEmail(...)
       })
 
-      // suppress unused warning on icp (stored to DB; not read further)
       void icp
+      void referenceSummary
 
       return {
         success: true,
@@ -973,9 +665,6 @@ export const researchNewClient = inngest.createFunction(
         hooksAdded: hookCount,
       }
     } catch (err) {
-      // Any uncaught error in a step.run after retries arrives here.
-      // Mark the run failed so the UI can show the friendly state +
-      // retry button (docs/UX.md §6).
       const message =
         err instanceof NonRetriableError
           ? err.message
