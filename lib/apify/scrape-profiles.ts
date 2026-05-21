@@ -1,6 +1,7 @@
 import "server-only"
 
-import { apify } from "./client"
+import { getApifyClient } from "./client"
+import { normaliseItem } from "./scrape-hashtags"
 import type {
   CompetitorProfile,
   ScrapedReelRaw,
@@ -35,21 +36,30 @@ export async function scrapeAllCompetitorProfiles(
     const batch = profiles.slice(i, i + BATCH_SIZE)
     const batchResults = await Promise.all(
       batch.map(async (profile) => {
-        const existingReels = stage1ByCreator.get(profile.handle) ?? []
+        // Only count Stage-1 entries that are actual videos (have a videoUrl)
+        // toward the per-profile quota. Photo/carousel posts from Stage 1 are
+        // included for handle discovery but cannot substitute for videos —
+        // we need real reels for transcription and dissection.
+        const allStage1 = stage1ByCreator.get(profile.handle) ?? []
+        const existingReels = allStage1.filter((r) => !!r.videoUrl)
         const needed = REELS_PER_PROFILE - existingReels.length
 
         let freshReels: ScrapedReelRaw[] = []
         if (needed > 0) {
           try {
             freshReels = await scrapeProfileTopReels(profile.handle, needed)
-          } catch {
-            // Per-profile failure is non-fatal — the pipeline keeps
-            // moving with whatever we did get.
+          } catch (err) {
+            // Per-profile failure is non-fatal — the pipeline keeps moving
+            // with whatever we did get. Log so auth/rate-limit failures are
+            // visible instead of silently producing 0 reels.
+            console.error(`[scrape-profiles] failed to scrape @${profile.handle}:`, err)
             freshReels = []
           }
         }
 
         const merged = deduplicateByUrl([...existingReels, ...freshReels])
+        // existingReels are already video-only (filtered above); freshReels from
+        // the profile scraper are always videos (reel-scraper actor, video URLs)
         return { handle: profile.handle, reels: merged.slice(0, REELS_PER_PROFILE) }
       })
     )
@@ -75,16 +85,21 @@ export async function scrapeProfileTopReels(
   if (limit <= 0) return []
   const cleanHandle = handle.replace(/^@/, "")
 
-  const run = await apify.actor("apify/instagram-reel-scraper").call({
-    directUrls: [`https://www.instagram.com/${cleanHandle}/reels/`],
+  const client = getApifyClient()
+  const run = await client.actor("apify/instagram-reel-scraper").call({
+    username: cleanHandle,
     resultsLimit: limit,
     includeVideoUrl: true,
     includeAudioData: true,
-    sortReelsBy: "mostViewedFirst",
+    // sortReelsBy is not supported when using username input — actor returns
+    // reels in profile order. View-based ranking happens downstream in the
+    // competitor discovery step.
   })
 
-  const { items } = await apify.dataset(run.defaultDatasetId).listItems()
-  return items as unknown as ScrapedReelRaw[]
+  const { items } = await client.dataset(run.defaultDatasetId).listItems()
+  // Apply the same normalisation as Stage 1 — ensures ownerUsername,
+  // ownerFollowersCount, and all field aliases are resolved consistently.
+  return (items as Record<string, unknown>[]).map(normaliseItem)
 }
 
 /**
@@ -92,22 +107,66 @@ export async function scrapeProfileTopReels(
  * they appeared in Stage 1. Returns a map keyed by handle so callers
  * can merge with Stage 2 results.
  */
+/**
+ * Return shape for scrapeReferenceCreators.
+ * `actorErrorCount` counts handles where the Apify actor threw (rate-limit,
+ * credit exhaustion, Instagram block) — distinct from handles where the actor
+ * succeeded but genuinely returned 0 reels. Callers use this to decide whether
+ * the empty result is structural (NonRetriableError) or transient (retry).
+ */
+export type ReferenceCreatorResult = {
+  reelsMap: Map<string, ScrapedReelRaw[]>
+  actorErrorCount: number   // actor threw → likely transient
+  zeroResultCount: number   // actor ran, returned 0 → might be structural
+}
+
 export async function scrapeReferenceCreators(
   handles: string[]
-): Promise<Map<string, ScrapedReelRaw[]>> {
-  if (handles.length === 0) return new Map()
+): Promise<ReferenceCreatorResult> {
+  if (handles.length === 0) {
+    return { reelsMap: new Map(), actorErrorCount: 0, zeroResultCount: 0 }
+  }
 
-  const results = new Map<string, ScrapedReelRaw[]>()
+  const reelsMap = new Map<string, ScrapedReelRaw[]>()
+  let actorErrorCount = 0
+  let zeroResultCount = 0
+
   for (const handle of handles) {
+    const cleanHandle = handle.replace(/^@/, "")
     try {
-      const reels = await scrapeProfileTopReels(handle, REELS_PER_PROFILE)
-      results.set(handle.replace(/^@/, ""), reels)
-    } catch {
-      // Same partial-failure policy — log and continue.
-      results.set(handle.replace(/^@/, ""), [])
+      const reels = await scrapeProfileTopReels(cleanHandle, REELS_PER_PROFILE)
+      reelsMap.set(cleanHandle, reels)
+      if (reels.length === 0) {
+        // Actor ran successfully but found nothing — could be no Reels on the account,
+        // or a soft Instagram block that returns an empty result set instead of an error.
+        zeroResultCount++
+        console.warn(
+          `[scrape-profiles] reference creator @${cleanHandle}: actor returned 0 reels ` +
+          `(account may have no public Reels, or Instagram soft-blocked the scraper)`
+        )
+      } else {
+        console.log(`[scrape-profiles] reference creator @${cleanHandle}: ${reels.length} reels`)
+      }
+    } catch (err) {
+      // Actor threw — most likely causes: insufficient Apify credits on this token,
+      // Instagram rate-limiting, or the account is private/deleted.
+      actorErrorCount++
+      console.error(
+        `[scrape-profiles] reference creator @${cleanHandle} actor FAILED (will continue):`,
+        err
+      )
+      reelsMap.set(cleanHandle, [])
     }
   }
-  return results
+
+  console.log(
+    `[scrape-profiles] reference creators summary: ` +
+    `${handles.length} handles, ${actorErrorCount} actor errors, ` +
+    `${zeroResultCount} returned 0 reels, ` +
+    `${handles.length - actorErrorCount - zeroResultCount} with reels`
+  )
+
+  return { reelsMap, actorErrorCount, zeroResultCount }
 }
 
 // ---------------------------------------------------------------------------

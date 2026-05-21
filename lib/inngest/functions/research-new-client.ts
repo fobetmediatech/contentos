@@ -2,7 +2,7 @@ import "server-only"
 
 import { NonRetriableError } from "inngest"
 
-import { extractFollowerCounts } from "@/lib/apify/get-follower-counts"
+import { resolveFollowerCounts } from "@/lib/apify/get-follower-counts"
 import {
   buildNicheCacheKey,
   fetchFromNicheCache,
@@ -10,7 +10,12 @@ import {
   writeToNicheCache,
 } from "@/lib/apify/niche-cache"
 import { scrapeByHashtags } from "@/lib/apify/scrape-hashtags"
-import { scrapeAllCompetitorProfiles } from "@/lib/apify/scrape-profiles"
+import { scrapeByKeywords } from "@/lib/apify/scrape-keywords"
+import {
+  scrapeAllCompetitorProfiles,
+  scrapeReferenceCreators,
+} from "@/lib/apify/scrape-profiles"
+import { scrapeTopComments } from "@/lib/apify/scrape-comments"
 import { filterValidVideoUrls } from "@/lib/apify/validate-video-url"
 import { classifyReelsBatch } from "@/lib/gemini/agents/classifier"
 import { dissectReelsBatch } from "@/lib/gemini/agents/dissector"
@@ -19,10 +24,14 @@ import { generateICP } from "@/lib/gemini/agents/icp"
 import { generatePillars } from "@/lib/gemini/agents/pillar"
 import { transcribeReelsParallel } from "@/lib/groq/transcribe"
 import { aggregateDissections } from "@/lib/research/aggregate-dissections"
-import { discoverCompetitors } from "@/lib/research/competitor-discovery"
+import {
+  computeCompetitorTier,
+  discoverCompetitors,
+} from "@/lib/research/competitor-discovery"
 import {
   extractAndStoreHooks,
   fetchAnalyzedReels,
+  fetchReelsAudioData,
   fetchReelsForDissection,
   insertScrapedReelRows,
   markResearchComplete,
@@ -34,8 +43,10 @@ import {
   updateReelDissections,
   updateResearchStep,
 } from "@/lib/research/storage"
+import { computeTrendingAudio } from "@/lib/research/trending-audio"
 import type {
   CompetitorProfile,
+  CompetitorTier,
   CompetitorType,
   HookType,
   ReelFormat,
@@ -57,6 +68,114 @@ function deriveBroaderHashtags(niche: string): string[] {
   // High-volume discovery tags common on Indian Instagram reels
   const discovery = ["reels", "india", "trending"]
   return [...new Set([...words, ...discovery])].slice(0, 6)
+}
+
+/**
+ * Build 2–4 word geo-specific search phrases for Instagram keyword search.
+ *
+ * Extracts location from the niche string (e.g. "Dubai" from "Real-estate in Dubai")
+ * and produces CREATOR-INTENT queries that surface advisor/educator accounts who
+ * make Reels — NOT transaction-intent queries like "buy property dubai" which
+ * return listing agencies and developer accounts that post photos, not Reels.
+ *
+ * Creator-intent = searches for advice, tips, guides → finds creators who EXPLAIN
+ * Transaction-intent = searches for listings, prices → finds agencies that ADVERTISE
+ */
+function buildGeoKeywords(niche: string, painPoints: string[]): string[] {
+  // Extract the niche topic and geo from e.g. "Real-estate in Dubai"
+  const parts = niche.replace(/-/g, " ").split(/\s+in\s+/i)
+  const topic = parts[0]?.trim() ?? niche
+  const location = parts[1]?.trim() ?? ""
+
+  const keywords: string[] = []
+
+  if (location) {
+    // Creator-intent templates — surface educators/advisors who make Reels
+    keywords.push(`${topic} tips ${location}`.toLowerCase())
+    keywords.push(`${location} ${topic} guide`.toLowerCase())
+    keywords.push(`${topic} advice ${location}`.toLowerCase())
+    keywords.push(`invest ${location}`.toLowerCase())
+  } else {
+    keywords.push(`${topic} tips`.toLowerCase())
+    keywords.push(`${topic} guide`.toLowerCase())
+    keywords.push(`learn ${topic}`.toLowerCase())
+  }
+
+  // Add top pain-point phrases (2–4 words only — these are naturally creator-intent
+  // because they describe the audience's problem, which creators address in Reels)
+  for (const pp of painPoints.slice(0, 3)) {
+    const phrase = pp.trim()
+    const words = phrase.split(/\s+/).length
+    if (words >= 2 && words <= 4) {
+      keywords.push(location ? `${phrase} ${location}`.toLowerCase() : phrase.toLowerCase())
+    }
+  }
+
+  return [...new Set(keywords)].slice(0, 6)
+}
+
+/**
+ * Filter Stage 1 reels to only those mentioning the target location
+ * in caption or hashtags. Prevents global accounts (UK, AU, Cyprus etc.)
+ * from polluting competitor discovery for geo-specific niches.
+ *
+ * Falls back to the unfiltered pool if fewer than 10 reels match — avoids
+ * over-filtering niches that don't have strong geo-tagging conventions.
+ */
+function filterGeoRelevant(
+  reels: ScrapedReelRaw[],
+  niche: string
+): ScrapedReelRaw[] {
+  // Extract location words from niche (e.g. "Dubai", "UAE" from "Real-estate in Dubai")
+  const parts = niche.replace(/-/g, " ").split(/\s+in\s+/i)
+  const location = parts[1]?.trim() ?? ""
+  if (!location) return reels // no geo component — don't filter
+
+  // Common synonyms / abbreviations for major markets
+  const geoSynonyms: Record<string, string[]> = {
+    dubai: ["dubai", "dxb", "uae", "emirates", "burj", "palm jumeirah", "marina"],
+    mumbai: ["mumbai", "bombay", "bandra", "juhu", "lower parel"],
+    delhi: ["delhi", "ncr", "noida", "gurgaon", "gurugram"],
+    bangalore: ["bangalore", "bengaluru", "btm", "koramangala"],
+    london: ["london", "uk", "england"],
+    singapore: ["singapore", "sg"],
+    toronto: ["toronto", "canada"],
+    sydney: ["sydney", "australia"],
+  }
+  const terms = geoSynonyms[location.toLowerCase()] ?? [location.toLowerCase()]
+
+  const matched = reels.filter((r) => {
+    const text = [
+      r.caption ?? "",
+      ...(r.hashtags ?? []),
+    ].join(" ").toLowerCase()
+    return terms.some((t) => text.includes(t))
+  })
+
+  const MIN = 10
+  if (matched.length >= MIN) {
+    console.log(`[filterGeoRelevant] ${matched.length}/${reels.length} reels match location "${location}"`)
+    return matched
+  }
+
+  console.warn(
+    `[filterGeoRelevant] only ${matched.length} geo-matched reels (< ${MIN}) — ` +
+    `keeping unfiltered pool of ${reels.length} to avoid empty Stage 1`
+  )
+  return reels
+}
+
+/**
+ * Merge two reel arrays, deduplicating by URL. Second array supplements
+ * the first — used to merge hashtag scrape + keyword scrape results.
+ */
+function mergeReelsByUrl(
+  primary: ScrapedReelRaw[],
+  supplement: ScrapedReelRaw[]
+): ScrapedReelRaw[] {
+  const seen = new Set(primary.map((r) => r.url))
+  const novel = supplement.filter((r) => r.url && !seen.has(r.url))
+  return [...primary, ...novel]
 }
 
 /**
@@ -115,18 +234,23 @@ export const researchNewClient = inngest.createFunction(
       const hashtags = flattenClusters(clusters)
 
       // -----------------------------------------------------------------
-      // Step 2: Stage 1 hashtag scrape — 3-attempt fallback strategy
+      // Step 2: Stage 1 discovery — keyword-first, hashtag-supplementary
       //
-      // Attempt 1: Full hashtag list via the niche cache (fast + free
-      //   for repeat niches within the same week).
-      // Attempt 2: Top 3 primary hashtags only — narrows the query when
-      //   broad lists hit Instagram's anti-scrape rate limits.
-      // Attempt 3: Single niche-derived words + discovery tags — very
-      //   broad but almost always returns something.
+      // Priority inversion: the keyword scraper (5.0★, uses Instagram's own
+      // search API) is now the PRIMARY source. The hashtag scraper (2.9★)
+      // is frequently blocked by Instagram and is used only as a supplement.
       //
-      // All successful results are written to the niche cache so
-      // downstream steps (3, 4, 5) can read via fetchFromNicheCache.
-      // Only throws NonRetriableError after ALL three attempts fail.
+      // Attempt 1 (parallel):
+      //   - Keyword scraper: 60 results across niche + pain keywords (PRIMARY)
+      //   - Hashtag cache: free if same niche was researched this week
+      // Attempt 2 (if pool < 10, parallel):
+      //   - Keyword scraper: 80 results, wider query set
+      //   - Hashtag scraper: top 3 primary hashtags only (live)
+      // Attempt 3 (if pool < 5, parallel):
+      //   - Keyword scraper: 100 results, broadest niche terms
+      //   - Hashtag scraper: single-word broad fallback
+      //
+      // Cache write: only when ≥ 10 reels (prevents thin-result poisoning).
       // -----------------------------------------------------------------
       const { stage1Count, cacheKey } = await step.run(
         "scrape-hashtags",
@@ -134,38 +258,89 @@ export const researchNewClient = inngest.createFunction(
           await updateResearchStep(researchRunId, "finding_competitors")
           const key = buildNicheCacheKey(niche, hashtags)
 
-          // Attempt 1 — full list with cache
-          let reels = await scrapeOrCacheHashtags(hashtags, niche, agencyId)
+          // Build geo-specific search keywords from the short niche string
+          // (e.g. "Real-estate in Dubai") and ICP pain points.
+          //
+          // We deliberately do NOT use intakeAnswers.what_they_do here —
+          // that field contains the full business_description (30+ words)
+          // which Instagram's search API rejects or mis-ranks. The niche
+          // string is short, specific, and geo-tagged.
+          //
+          // We also do NOT use cluster primary_hashtags as search terms —
+          // hashtags like "bharatdubai" or "askarealtor" are not readable
+          // search phrases and return irrelevant global content.
+          const searchKeywords = buildGeoKeywords(niche, clientInputs.pain_points ?? [])
+
           console.log(
-            `[scrape-hashtags] attempt 1 (${hashtags.length} hashtags, cache): ${reels.length} reels`
+            `[stage1] search keywords: ${searchKeywords.join(" | ")}`
           )
 
-          // Attempt 2 — top 3 primary hashtags, live scrape
-          if (reels.length < 3) {
-            const top3 = hashtags.slice(0, 3)
+          // Attempt 1 — keyword scraper (PRIMARY, 60 results) in parallel with
+          // hashtag cache (free for repeat niches this week).
+          const [keywordReels, hashtagReels] = await Promise.all([
+            scrapeByKeywords(searchKeywords, 60),
+            scrapeOrCacheHashtags(hashtags, niche, agencyId),
+          ])
+
+          console.log(
+            `[stage1] attempt 1 — keyword: ${keywordReels.length} reels | hashtag cache: ${hashtagReels.length} reels`
+          )
+
+          let reels = mergeReelsByUrl(keywordReels, hashtagReels)
+          console.log(`[stage1] merged pool after attempt 1: ${reels.length} reels`)
+
+          // Geographic relevance filter — drop reels with no mention of
+          // the target location in caption or hashtags. Prevents global
+          // real estate / lifestyle accounts from polluting Dubai competitor
+          // discovery when keywords like "property" surface UK/AU/Cyprus accounts.
+          // Falls back to unfiltered pool if geo filter is too aggressive.
+          reels = filterGeoRelevant(reels, niche)
+          console.log(`[stage1] after geo filter: ${reels.length} reels`)
+
+          if (reels.length >= 10) {
+            await writeToNicheCache(key, reels, agencyId)
+          }
+
+          // Attempt 2 — wider keyword pass + top 3 hashtags live scrape.
+          if (reels.length < 10) {
+            const widerKeywords = [
+              niche,
+              ...searchKeywords,
+              ...deriveBroaderHashtags(niche).slice(0, 2),
+            ].slice(0, 6)
+            const top3Hashtags = hashtags.slice(0, 3)
             console.log(
-              `[scrape-hashtags] attempt 2 — top 3 hashtags: ${top3.join(", ")}`
+              `[stage1] attempt 2 — wider keywords: ${widerKeywords.join(" | ")} + hashtags: ${top3Hashtags.join(", ")}`
             )
-            reels = await scrapeByHashtags(top3)
+            const [kwExtra, htExtra] = await Promise.all([
+              scrapeByKeywords(widerKeywords, 80),
+              scrapeByHashtags(top3Hashtags),
+            ])
+            reels = mergeReelsByUrl(reels, mergeReelsByUrl(kwExtra, htExtra))
             console.log(
-              `[scrape-hashtags] attempt 2 result: ${reels.length} reels`
+              `[stage1] attempt 2 result: ${reels.length} reels (keyword: ${kwExtra.length}, hashtag: ${htExtra.length})`
             )
-            if (reels.length >= 3) {
+            if (reels.length >= 10) {
               await writeToNicheCache(key, reels, agencyId)
             }
           }
 
-          // Attempt 3 — broad single-word hashtags derived from the niche
-          if (reels.length < 3) {
-            const broaderHashtags = deriveBroaderHashtags(niche)
+          // Attempt 3 — broadest possible keyword pass + single-word hashtags.
+          if (reels.length < 5) {
+            const broadKeywords = deriveBroaderHashtags(niche)
+            const broadHashtags = broadKeywords
             console.log(
-              `[scrape-hashtags] attempt 3 — broader hashtags: ${broaderHashtags.join(", ")}`
+              `[stage1] attempt 3 — broad keywords: ${broadKeywords.join(" | ")}`
             )
-            reels = await scrapeByHashtags(broaderHashtags)
+            const [kwExtra, htExtra] = await Promise.all([
+              scrapeByKeywords(broadKeywords, 100),
+              scrapeByHashtags(broadHashtags),
+            ])
+            reels = mergeReelsByUrl(reels, mergeReelsByUrl(kwExtra, htExtra))
             console.log(
-              `[scrape-hashtags] attempt 3 result: ${reels.length} reels`
+              `[stage1] attempt 3 result: ${reels.length} reels (keyword: ${kwExtra.length}, hashtag: ${htExtra.length})`
             )
-            if (reels.length >= 3) {
+            if (reels.length >= 5) {
               await writeToNicheCache(key, reels, agencyId)
             }
           }
@@ -175,9 +350,10 @@ export const researchNewClient = inngest.createFunction(
       )
 
       if (stage1Count < 3) {
-        throw new NonRetriableError(
-          `Only ${stage1Count} reel(s) found after 3 scrape attempts. ` +
-            "Instagram may be rate-limiting this niche — try again in a few hours or update your hashtags."
+        throw new Error(
+          `Only ${stage1Count} reel(s) found after 3 discovery attempts. ` +
+            "Both keyword and hashtag scrapers returned minimal results — " +
+            "Inngest will retry automatically. If this persists, check Apify actor credits."
         )
       }
 
@@ -197,7 +373,9 @@ export const researchNewClient = inngest.createFunction(
         "get-follower-counts",
         async () => {
           const stage1Reels = await fetchFromNicheCache(cacheKey)
-          const map = extractFollowerCounts(stage1Reels)
+          // Two-pass resolution: payload extraction (free) + Apify fallback
+          // for handles where the hashtag scraper didn't return owner metadata.
+          const map = await resolveFollowerCounts(stage1Reels)
           // Maps don't serialise; shape as a plain Record for Inngest state.
           return Object.fromEntries(map.entries()) as Record<string, number>
         }
@@ -258,6 +436,18 @@ export const researchNewClient = inngest.createFunction(
       })
       const { topPerforming, highViews } = competitorBundle
 
+      // Guard: if Stage 1 scraped reels but every account turned out to be
+      // a personal/test account with a KNOWN follower count below 1k.
+      // Accounts with unknown follower counts are included by discoverCompetitors
+      // so this only fires when the scraper returned genuinely tiny accounts.
+      if (topPerforming.length + highViews.length === 0) {
+        throw new NonRetriableError(
+          "No usable competitor accounts found in this niche — " +
+          "all scraped accounts had confirmed follower counts below 1,000. " +
+          "Try broader hashtags or a different niche."
+        )
+      }
+
       // -----------------------------------------------------------------
       // Step 4b: Persist the 10 discovered competitor profiles
       // (big × 5 + fastest_growing × 5 — reference creators are NOT
@@ -283,6 +473,15 @@ export const researchNewClient = inngest.createFunction(
         ]
       )
 
+      // competitorTierByHandle — pre-computed server-side so the dissector
+      // receives the tier label without recomputing it from raw numbers.
+      const competitorTierByHandle = new Map<string, CompetitorTier>(
+        [...topPerforming, ...highViews].map((p: CompetitorProfile) => [
+          p.handle,
+          computeCompetitorTier(p),
+        ])
+      )
+
       // -----------------------------------------------------------------
       // Step 5: Scrape profiles + transcribe + classify (merged)
       //
@@ -296,9 +495,21 @@ export const researchNewClient = inngest.createFunction(
       const { totalReels } = await step.run("scrape-profiles", async () => {
         await updateResearchStep(researchRunId, "scraping_profiles")
 
-        // 5a. Scrape 10 profiles (5 big + 5 fastest_growing)
+        // 5a. Scrape profiles.
+        // Reference creators (explicitly provided by the agency) are ALWAYS
+        // scraped first — they are vetted, niche-relevant accounts the client
+        // already knows. Stage 1 discovered profiles fill remaining slots.
         // Re-fetch stage-1 reels for M2 deduplication.
         const stage1Reels = await fetchFromNicheCache(cacheKey)
+
+        // Scrape reference creators first — mandatory, highest-quality signal
+        const refHandles = (referenceCreators ?? []).map((h: string) => h.replace(/^@/, ""))
+        const refResult = refHandles.length > 0
+          ? await scrapeReferenceCreators(refHandles)
+          : { reelsMap: new Map<string, ScrapedReelRaw[]>(), actorErrorCount: 0, zeroResultCount: 0 }
+        const refReelsMap = refResult.reelsMap
+        const refActorsFailed = refResult.actorErrorCount > 0
+
         const competitorProfiles: CompetitorProfile[] = [
           ...topPerforming,
           ...highViews,
@@ -307,6 +518,14 @@ export const researchNewClient = inngest.createFunction(
           competitorProfiles,
           stage1Reels
         )
+
+        // Merge reference creator reels into the pool (tagged as "big" —
+        // they are established, vetted accounts in the target niche).
+        for (const [handle, reels] of refReelsMap) {
+          if (!merged.has(handle)) {
+            merged.set(handle, reels)
+          }
+        }
 
         // Flatten + tag each reel with competitor_type and id
         const allReels: Array<
@@ -317,6 +536,66 @@ export const researchNewClient = inngest.createFunction(
           for (const r of reels) {
             allReels.push({ ...r, id: r.url, competitor_type: type })
           }
+        }
+
+        // Log per-source breakdown for diagnostics — helps distinguish
+        // "competitor accounts have no Reels" from "reference creators also failed".
+        const competitorHandleSet = new Set(competitorProfiles.map((p) => p.handle))
+        const competitorReelCount = allReels.filter((r) =>
+          competitorHandleSet.has(r.ownerUsername)
+        ).length
+        const referenceReelCount = allReels.filter(
+          (r) => !competitorHandleSet.has(r.ownerUsername)
+        ).length
+        console.log(
+          `[step 5a] ${competitorReelCount} reels from ${competitorProfiles.length} competitor profiles | ` +
+          `${referenceReelCount} reels from ${refHandles.length} reference creator(s) | ` +
+          `total: ${allReels.length}`
+        )
+
+        // Guard: if every per-profile scrape returned 0, the pipeline cannot
+        // continue (nothing to transcribe, classify, or dissect).
+        // Distinguish structural (photo-only niche) from transient (rate limit).
+        if (allReels.length === 0) {
+          // Structural check: Stage 1 has posts for competitor handles but none
+          // have a videoUrl → these are photo-only accounts. Retrying won't help.
+          const anyVideoInStage1 = stage1Reels.some(
+            (r) => competitorHandleSet.has(r.ownerUsername) && !!r.videoUrl
+          )
+          const competitorsArePhotoOnly = !anyVideoInStage1 && stage1Reels.length > 0
+
+          // If any reference creator actor THREW (vs. returning 0 cleanly),
+          // the failure is transient (rate limit, credit exhaustion, Instagram block).
+          // Do NOT make this NonRetriable — the actor could succeed on retry.
+          if (refActorsFailed) {
+            throw new Error(
+              `Reference creator Apify actor(s) failed for: ${refHandles.join(", ")}. ` +
+              `This is likely a rate-limit or credit issue — check Apify logs. Will retry.`
+            )
+          }
+
+          if (competitorsArePhotoOnly) {
+            // Structural: all discovered competitors are photo-only AND reference
+            // creators also returned 0 (actors ran cleanly, accounts have no Reels).
+            // Retrying will burn Apify credits without helping.
+            throw new NonRetriableError(
+              `All ${competitorProfiles.length} discovered competitor accounts appear to be ` +
+              `photo/carousel-only (no Instagram Reels found in Stage 1 or Stage 2 data). ` +
+              `This niche predominantly uses photo posts rather than Reels. ` +
+              (refHandles.length > 0
+                ? `Reference creators (${refHandles.slice(0, 3).join(", ")}) also returned 0 Reels — ` +
+                  `verify these handles actively post Reels (check their Instagram profile → Reels tab). `
+                : `No reference creators were provided. `) +
+              `To fix: add handles of creators who post Reels in this niche (educators/advisors, not listing accounts).`
+            )
+          }
+
+          // Generic transient failure — Apify rate-limited or profiles temporarily private.
+          throw new Error(
+            `Scraped 0 reels from ${competitorProfiles.length} competitor profile(s) ` +
+            `and ${refHandles.length} reference creator(s). ` +
+            `Apify may be rate-limited or all profiles are private. Will retry.`
+          )
         }
 
         await updateResearchStep(researchRunId, "scraping_profiles", {
@@ -336,11 +615,16 @@ export const researchNewClient = inngest.createFunction(
         )
 
         // 5c. Transcribe (caption-first for validReels, Whisper turbo fallback)
+        // Niche + pain points are injected into the Whisper prompt as domain
+        // vocab hints — significantly improves accuracy for specialist niches
+        // (oncology terms, fitness jargon, financial terminology, etc.)
         await updateResearchStep(researchRunId, "reading_reels", {
           reelsScraped: allReels.length,
         })
         const transcriptMap = await transcribeReelsParallel(validReels, {
           concurrency: 3,
+          niche: clientInputs.niche,
+          painPoints: clientInputs.pain_points,
         })
         console.log(
           `[step 5c] transcriptMap has ${transcriptMap.size} entries from Whisper/caption`
@@ -363,8 +647,8 @@ export const researchNewClient = inngest.createFunction(
         // 5e. Write all rows to DB.
         // Caption fallback: reels that failed URL validation (expired CDN link)
         // but have a substantive caption (>50 chars) are still stored with a
-        // transcript so the dissect step can process them. This is the most
-        // common case — Instagram CDN URLs expire in hours but captions don't.
+        // transcript so the dissect step can process them. 50 chars filters
+        // pure emoji/hashtag spam while preserving real captions.
         const rows = allReels.map((r) => {
           const whisperResult = transcriptMap.get(r.id)
           const captionFallback =
@@ -407,6 +691,25 @@ export const researchNewClient = inngest.createFunction(
         // Already sorted by virality_score desc; take top 30 (C5)
         const top30 = reelsForDissection.slice(0, 30)
 
+        // 6a. Scrape top comments for the top 10 reels by virality.
+        // Comments = highest-signal evidence of what viewers responded to.
+        // Skipped for reels with high comment/like ratio (likely funnel reels
+        // where comments are conversion responses, not organic sentiment).
+        // Non-fatal: if actor fails, topComments is {} and dissection continues.
+        const top10ForComments = top30
+          .slice(0, 10)
+          .filter((r) => {
+            // Pre-filter likely funnel reels (> 5% comment/like ratio)
+            const ratio = r.likes > 0 ? r.comments / r.likes : 0
+            return ratio <= 0.05
+          })
+          .map((r) => r.instagramUrl)
+
+        const commentsMap = await scrapeTopComments(top10ForComments)
+        console.log(
+          `[step 6a] scraped comments for ${commentsMap.size}/${top10ForComments.length} reels`
+        )
+
         const inputs = top30.map((r) => ({
           id: r.instagramUrl,
           transcript: r.transcript,
@@ -420,6 +723,13 @@ export const researchNewClient = inngest.createFunction(
           caption: r.caption,
           creator_handle: r.creatorHandle,
           competitor_type: r.competitorType as CompetitorType,
+          // Pre-computed tier — the dissector uses this as context without
+          // recomputing it from raw numbers (which it wouldn't have anyway).
+          competitor_tier: (competitorTierByHandle.get(r.creatorHandle) ??
+            "on_pace") as CompetitorTier,
+          // Top comments by likes — evidence of what emotionally resonated.
+          // Empty array for reels where comment scrape wasn't run or failed.
+          topComments: commentsMap.get(r.instagramUrl) ?? [],
         }))
 
         const out = await dissectReelsBatch(inputs)
@@ -436,6 +746,19 @@ export const researchNewClient = inngest.createFunction(
         return { dissected: out.size }
       })
 
+      // Guard: if every reel lacked a transcript AND a usable caption,
+      // the dissect step produces an empty map and the pillar agent will
+      // hallucinate from an empty summary. Non-retriable — retrying the
+      // same reels won't produce transcripts that don't exist.
+      if (dissected === 0) {
+        throw new NonRetriableError(
+          "Zero reels were dissected — all scraped reels lacked valid transcripts " +
+          "and video URLs. Cannot generate meaningful content pillars without " +
+          "content analysis. Check that the Apify actor returns video URLs and " +
+          "that Groq / Gemini credentials are correct."
+        )
+      }
+
       // -----------------------------------------------------------------
       // Step 7: Aggregate dissections (pure TS — C4)
       //
@@ -443,14 +766,32 @@ export const researchNewClient = inngest.createFunction(
       // Returns a ~2k-token summary for the pillar agent.
       // -----------------------------------------------------------------
       const summary = await step.run("aggregate-dissections", async () => {
-        const analyzedReels = await fetchAnalyzedReels(researchRunId)
+        // Fetch dissected reels (for hook/format/emotion aggregation) and
+        // all reel audio data (for trending audio) in parallel.
+        const [analyzedReels, audioData] = await Promise.all([
+          fetchAnalyzedReels(researchRunId),
+          fetchReelsAudioData(researchRunId),
+        ])
+
         const dissectionList = analyzedReels.map((r) => ({
           ...r.dissection,
           format: r.format as ReelFormat | undefined,
           virality_score: r.viralityScore,
           competitor_type: r.competitorType as CompetitorType,
         }))
-        return aggregateDissections(dissectionList)
+        const baseSummary = aggregateDissections(dissectionList)
+
+        // Trending audio — zero extra API cost, derived from audio_name/
+        // audio_uses columns already stored in scraped_reels.
+        const trending_audio = computeTrendingAudio(audioData)
+        console.log(
+          `[step 7] trending audio: ${trending_audio.length} tracks identified ` +
+            (trending_audio.length > 0
+              ? `(top: "${trending_audio[0].audio_name}", ${trending_audio[0].avg_virality.toFixed(2)}× avg virality)`
+              : "(no trackable audio found)")
+        )
+
+        return { ...baseSummary, trending_audio }
       })
 
       // -----------------------------------------------------------------
@@ -463,8 +804,12 @@ export const researchNewClient = inngest.createFunction(
         const analyzedReels = await fetchAnalyzedReels(researchRunId)
         const hooks = analyzedReels.map((r) => ({
           hook_text: r.dissection.hook.text,
-          hook_type: r.dissection.hook.type as HookType,
+          // Store archetype as hook_type — hook_bank.hook_type is a text column
+          // so it accepts both old 7-type HookType values and new archetypes.
+          // The old HookType import is kept for the hook-classifier agent path.
+          hook_type: r.dissection.hook.primary_archetype as unknown as HookType,
           niche,
+          strength: r.dissection.hook.strength,
         }))
         const result = await extractAndStoreHooks(agencyId, clientId, hooks)
         await updateResearchStep(researchRunId, "building_hooks", {
@@ -475,9 +820,19 @@ export const researchNewClient = inngest.createFunction(
 
       // -----------------------------------------------------------------
       // Step 9: Generate ICP (Flash-Lite)
+      //
+      // Runs after aggregation so confirmed_emotions and
+      // confirmed_hook_archetypes from real competitor data can be
+      // injected — the ICP is no longer purely intake-form-derived.
       // -----------------------------------------------------------------
       const icp = await step.run("generate-icp", async () => {
-        const result = await generateICP(clientInputs)
+        const result = await generateICP({
+          ...clientInputs,
+          // Research-confirmed signals from competitor analysis.
+          // If summary is empty (first-run edge case), these will be [].
+          confirmed_emotions: summary.top_emotions,
+          confirmed_hook_archetypes: summary.top_hook_archetypes,
+        })
         await storeClientICP(clientId, {
           ...result,
           // Preserve raw wizard inputs alongside the LLM-derived ICP

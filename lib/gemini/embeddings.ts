@@ -15,7 +15,11 @@ import { ai } from "./client"
  * so callers should always pick the right one.
  */
 
-const EMBEDDING_MODEL = "text-embedding-004"
+// text-embedding-004 was retired; gemini-embedding-001 is the replacement.
+// outputDimensionality: 768 keeps vectors compatible with the existing
+// hook_bank vector(768) column and pgvector index — no DB migration needed.
+const EMBEDDING_MODEL = "gemini-embedding-001"
+const EMBEDDING_DIMS = 768
 
 export type EmbeddingTask = "RETRIEVAL_DOCUMENT" | "RETRIEVAL_QUERY"
 
@@ -26,7 +30,7 @@ export async function embedText(
   const result = await ai.models.embedContent({
     model: EMBEDDING_MODEL,
     contents: text,
-    config: { taskType },
+    config: { taskType, outputDimensionality: EMBEDDING_DIMS },
   })
 
   const vector = result.embeddings?.[0]?.values

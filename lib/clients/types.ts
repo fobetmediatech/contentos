@@ -77,20 +77,26 @@ export const TONE_OPTIONS = [
 ] as const
 
 /**
- * Suggested pain-point chips. Users can pick from these or type their
- * own. Phrased in plain audience-side language — the script writer
- * agent maps these directly into prompts (see docs/AGENTS.md Agent 1).
+ * Suggested pain-point chips shown in the new-client wizard Step 2.
+ * These are the TARGET AUDIENCE's real-world life problems — not the
+ * brand's social media challenges. The keyword agent uses these as
+ * research signals to find hashtags and competitor accounts whose
+ * content resonates with this audience.
+ *
+ * Keep suggestions generic enough to span niches. If none fit,
+ * the user types their own via the custom input.
  */
 export const SUGGESTED_PAIN_POINTS = [
-  "Low engagement",
-  "Not enough followers",
-  "Slow growth",
-  "Don't know what to post",
-  "Posts not going viral",
-  "No time to create content",
-  "Can't think of ideas",
-  "Audience drops off",
-  "Hard to stand out",
+  "Weight loss or fitness struggles",
+  "Financial stress or saving money",
+  "Health anxiety or prevention",
+  "Low confidence or self-esteem",
+  "Career growth or job hunting",
+  "Parenting challenges",
+  "Skin or beauty concerns",
+  "Lack of time or energy",
+  "Mental health or burnout",
+  "Learning new skills",
 ] as const
 
 /**

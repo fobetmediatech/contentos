@@ -57,14 +57,21 @@ Audience type: ${input.audience_city_type}
 Language level: ${input.hinglish_level}/5
 Topics that worked before: ${input.best_performing_topics}
 
-Generate 5 hashtag clusters. Each:
-- 1 primary hashtag (broad)
-- 5 secondary hashtags (specific)
+Generate exactly 8 hashtag clusters. Each:
+- 1 primary hashtag (broad, high-volume)
+- 5 secondary hashtags (specific, niche)
 - intent: awareness / pain / aspiration / authority / trend
 - Include Hindi variants if language level >= 2
 
-Derive directly from inputs. Map audience's exact words to how they
-would actually hashtag on Instagram.`
+Intent distribution rules:
+- Generate exactly one cluster for each core intent: awareness, pain, aspiration, authority, trend
+- Add 3 more clusters for the intents most underserved by the inputs above
+- No intent may appear more than twice total
+
+Quality rules:
+- Every hashtag must actually exist and be used on Indian Instagram
+- Derive from the audience's exact language — do not invent
+- Map their words to how Indian creators actually hashtag`
 }
 
 const responseSchema: Schema = {
@@ -72,6 +79,8 @@ const responseSchema: Schema = {
   properties: {
     clusters: {
       type: Type.ARRAY,
+      minItems: "8",
+      maxItems: "8",
       items: {
         type: Type.OBJECT,
         properties: {
@@ -79,6 +88,7 @@ const responseSchema: Schema = {
           secondary_hashtags: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
+            minItems: "5",
             maxItems: "5",
           },
           intent: {
@@ -132,7 +142,13 @@ export function flattenClusters(clusters: HashtagCluster[]): string[] {
   const out: string[] = []
   for (const c of clusters) {
     for (const tag of [c.primary_hashtag, ...c.secondary_hashtags]) {
-      const norm = tag.replace(/^#/, "").trim().toLowerCase()
+      // Strip #, remove internal spaces (Instagram hashtags have no spaces),
+      // drop any remaining characters that Apify rejects (non-word, non-Devanagari).
+      const norm = tag
+        .replace(/^#/, "")
+        .replace(/\s+/g, "")
+        .trim()
+        .toLowerCase()
       if (!norm || seen.has(norm)) continue
       seen.add(norm)
       out.push(norm)

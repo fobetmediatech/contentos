@@ -1,6 +1,6 @@
 import "server-only"
 
-import { apify } from "./client"
+import { getApifyClient } from "./client"
 import type { ScrapedReelRaw } from "@/lib/research/types"
 
 /**
@@ -22,7 +22,11 @@ const HASHTAG_RESULTS_LIMIT = 25
  * downstream consumer (competitor discovery, follower lookup, DB writes)
  * always sees `ownerUsername` populated.
  */
-function normaliseItem(raw: Record<string, unknown>): ScrapedReelRaw {
+/**
+ * Exported so `scrape-profiles.ts` can normalise its raw items through
+ * the same logic — prevents `ownerUsername` being undefined on Stage 2 results.
+ */
+export function normaliseItem(raw: Record<string, unknown>): ScrapedReelRaw {
   const owner = raw.owner as Record<string, unknown> | undefined
 
   const ownerUsername =
@@ -66,6 +70,11 @@ function normaliseItem(raw: Record<string, unknown>): ScrapedReelRaw {
        raw.authorFollowersCount ??
        owner?.followersCount) as number | undefined,
     musicInfo: raw.musicInfo as ScrapedReelRaw["musicInfo"],
+    // share_count is only populated by the keyword-search actor
+    // (patient_discovery/instagram-search-reels). For hashtag-scraped reels
+    // this is always undefined — normalised here so the field is consistent
+    // across all ScrapedReelRaw objects regardless of scrape source.
+    share_count: (raw.share_count ?? raw.shareCount) as number | undefined,
   }
 }
 
@@ -91,26 +100,45 @@ export async function scrapeByHashtags(
 ): Promise<ScrapedReelRaw[]> {
   if (hashtags.length === 0) return []
 
-  const cleaned = hashtags.map((h) => h.replace(/^#/, ""))
+  // Strip # prefix, remove any spaces (Apify rejects hashtags containing spaces).
+  const cleaned = hashtags
+    .map((h) => h.replace(/^#/, "").replace(/\s+/g, "").trim())
+    .filter(Boolean)
   console.log(
     `[scrape-hashtags] calling Apify with ${cleaned.length} hashtags ` +
       `(limit=${limit}): ${cleaned.slice(0, 8).join(", ")}${cleaned.length > 8 ? "…" : ""}`
   )
 
-  const run = await apify
+  const client = getApifyClient()
+  const run = await client
     .actor("apify/instagram-hashtag-scraper")
     .call({
       hashtags: cleaned,
       resultsLimit: limit,
       includeVideoUrl: true,
       includeAudioData: true,
-      sortReelsBy: "mostViewedFirst",
+      // sortReelsBy omitted intentionally — "mostViewedFirst" hits a more
+      // restricted Instagram API endpoint that increases block probability.
+      // Default (chronological) is more reliable across regions.
     })
 
-  const { items } = await apify.dataset(run.defaultDatasetId).listItems()
+  const { items } = await client.dataset(run.defaultDatasetId).listItems()
   const normalised = (items as Record<string, unknown>[]).map(normaliseItem)
+
+  // Stage 1 is DISCOVERY — we want to find creator account handles, not rank content.
+  // Photos and carousels are included here (they have valid URL + ownerUsername but
+  // empty videoUrl). This is intentional for niches like real estate where accounts
+  // post many property photos alongside reels — filtering them out at Stage 1 would
+  // cause us to miss the account entirely.
+  //
+  // Video-only gate is enforced downstream in Step 5b via filterValidVideoUrls()
+  // (empty videoUrl returns valid=false) so only actual videos get transcribed,
+  // classified, and dissected. Virality in competitor-discovery.ts is also computed
+  // only from posts with videoViewCount > 0, so photos don't dilute the score.
+  const qualified = normalised.filter((r) => !!(r.url && r.ownerUsername))
   console.log(
-    `[scrape-hashtags] Apify returned ${items.length} raw items → ${normalised.length} normalised`
+    `[scrape-hashtags] Apify returned ${items.length} raw items → ` +
+      `${normalised.length} normalised → ${qualified.length} with valid URL+owner`
   )
-  return normalised
+  return qualified
 }

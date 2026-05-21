@@ -23,11 +23,11 @@ export const MODEL_ROUTING = {
 export type AgentName = keyof typeof MODEL_ROUTING
 
 export const THINKING_BUDGETS: Record<AgentName, number> = {
-  keyword_generation: 0,
+  keyword_generation: 512,  // Gemini minimum is 512; used to verify hashtags are real
   icp_generation: 0,
   hook_classification: 0,
   reel_classification: 0,
-  reel_dissection: 512, // C5 fix — was 2048
+  reel_dissection: 1024, // was 512 — deeper analysis for visual beats + compound hooks
   pillar_generation: 4096,
   script_writing: 8192,
   failure_audit: 8192,

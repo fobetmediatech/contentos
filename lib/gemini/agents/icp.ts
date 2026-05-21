@@ -27,6 +27,16 @@ export type ICPInput = {
   content_tone: string[]
   hinglish_level: 0 | 1 | 2 | 3 | 4 | 5
   reference_creators: string[]
+  /**
+   * Research-confirmed emotions from dissection summary.
+   * Injected after the aggregation step — not available on first run.
+   */
+  confirmed_emotions?: string[]
+  /**
+   * Research-confirmed hook archetypes ranked by virality.
+   * Used to ensure persona emotional drivers align with what actually works.
+   */
+  confirmed_hook_archetypes?: string[]
 }
 
 export type ICPOutput = {
@@ -48,6 +58,20 @@ Create a precise Ideal Content Profile for a brand's Instagram Reel strategy.
 Output ONLY valid JSON. No preamble.`
 
 export function buildICPPrompt(input: ICPInput): string {
+  const researchSection =
+    input.confirmed_emotions && input.confirmed_emotions.length > 0
+      ? `
+RESEARCH EVIDENCE (from ${input.confirmed_emotions.length > 0 ? "competitor analysis" : ""}):
+Research confirms these emotions resonate most strongly in this niche:
+${input.confirmed_emotions.map((e) => `  - ${e}`).join("\n")}
+
+Hook archetypes that perform best in this niche (ranked by virality):
+${(input.confirmed_hook_archetypes ?? []).map((h, i) => `  ${i + 1}. ${h}`).join("\n")}
+
+IMPORTANT: Ensure the 3 audience personas reflect these confirmed emotional drivers.
+The primary_emotions output must align with what research shows lands in this niche.`
+      : ""
+
   return `Create an ICP for this brand:
 
 Brand: ${input.brand_name}
@@ -58,12 +82,14 @@ Pain points: ${input.pain_points.join(", ")}
 Content tone: ${input.content_tone.join(", ")}
 Hinglish level: ${input.hinglish_level}
 Reference creators: ${input.reference_creators.join(", ") || "none"}
+${researchSection}
 
 Generate:
 - 3 audience personas (name, age, occupation, pain point, aspiration)
+  Each persona's pain_point must map to a real-life struggle — not a content preference
 - 5 content sensitivities (topics to strictly avoid for this audience)
 - Recommended posting frequency
-- Top 3 emotions content should trigger
+- Top 3 emotions content should trigger (must align with research evidence above if provided)
 - Content strengths based on niche and tone`
 }
 

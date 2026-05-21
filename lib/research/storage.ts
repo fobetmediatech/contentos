@@ -192,7 +192,9 @@ export async function storeCompetitorProfiles(
       agency_id: agencyId,
       research_run_id: researchRunId,
       handle: p.handle,
-      followers: p.followers ?? null,
+      // Store null when follower count is unknown (knownFollowers=false means
+      // the scraper payload didn't include the field — not that they have 0 followers).
+      followers: p.knownFollowers ? p.followers : null,
       competitor_type: p.type,
       avg_recent_virality: p.avgRecentVirality ?? null,
       recent_reel_count: p.recentReelCount ?? null,
@@ -232,10 +234,6 @@ type IncrementalReelRow = {
  * Insert scraped reel rows that already have transcript + classification.
  * Dissection is written separately by `updateReelDissections` after the
  * dissect step completes.
- *
- * Writes both the documented separate columns (format, face_visible, etc.)
- * AND the `analysis` jsonb that the original pipeline used, so both old and
- * new display queries find the data regardless of which schema the DB has.
  */
 export async function insertScrapedReelRows(
   clientId: string,
@@ -281,13 +279,6 @@ export async function insertScrapedReelRows(
     classifier_confidence: classification?.confidence ?? null,
     // Competitor type — top-level column
     competitor_type: competitorType,
-    // analysis jsonb — kept for backward-compat with display queries
-    // that read analysis.competitor_type / analysis.classification.format
-    analysis: {
-      competitor_type: competitorType,
-      classification: classification ?? null,
-      // dissection intentionally omitted — written by updateReelDissections
-    },
   }))
 
   const CHUNK = 50
@@ -372,7 +363,7 @@ export async function fetchReelsForDissection(
   const { data, error } = await supabase
     .from("scraped_reels")
     .select(
-      "instagram_url, transcript, format, virality_score, views, likes, comments, saves, audio_name, caption, creator_handle, competitor_type, analysis"
+      "instagram_url, transcript, format, virality_score, views, likes, comments, saves, audio_name, caption, creator_handle, competitor_type"
     )
     .eq("research_run_id", researchRunId)
     .not("transcript", "is", null)
@@ -388,11 +379,8 @@ export async function fetchReelsForDissection(
   )
 
   return (data ?? []).map((r) => {
-    // Resolve format and competitor_type from either the dedicated column
-    // or the analysis jsonb (whichever was actually populated).
-    const analysis = r.analysis as { competitor_type?: string; classification?: { format?: string } } | null
-    const format = (r.format ?? analysis?.classification?.format ?? null) as string | null
-    const competitorType = (r.competitor_type ?? analysis?.competitor_type ?? "big") as string
+    const format = (r.format ?? null) as string | null
+    const competitorType = (r.competitor_type ?? "big") as string
 
     return {
       instagramUrl: r.instagram_url as string,
@@ -428,7 +416,7 @@ export async function fetchAnalyzedReels(
   const supabase = createAdminClient()
   const { data, error } = await supabase
     .from("scraped_reels")
-    .select("dissection, format, virality_score, competitor_type, analysis")
+    .select("dissection, format, virality_score, competitor_type")
     .eq("research_run_id", researchRunId)
     .not("dissection", "is", null)
 
@@ -440,9 +428,8 @@ export async function fetchAnalyzedReels(
   return (data ?? [])
     .filter((r) => r.dissection != null)
     .map((r) => {
-      const analysis = r.analysis as { competitor_type?: string; classification?: { format?: string } } | null
-      const format = (r.format ?? analysis?.classification?.format ?? null) as string | null
-      const competitorType = (r.competitor_type ?? analysis?.competitor_type ?? "big") as string
+      const format = (r.format ?? null) as string | null
+      const competitorType = (r.competitor_type ?? "big") as string
       return {
         dissection: r.dissection as ReelDissection,
         format,
@@ -450,6 +437,42 @@ export async function fetchAnalyzedReels(
         competitorType,
       }
     })
+}
+
+// ---------------------------------------------------------------------------
+// audio aggregation
+
+/**
+ * Fetch per-reel audio data for the trending audio aggregation step.
+ *
+ * Uses ALL reels in the research run (not just dissected ones) so we have
+ * the widest possible sample — typically 60–100 reels across 10 competitor
+ * profiles. The dissected subset is only 30 reels; many audio tracks only
+ * appear once or twice, so broader sample = more accurate trending signal.
+ *
+ * Non-fatal: returns [] on DB error so the aggregation step can still
+ * complete with an empty trending_audio list.
+ */
+export async function fetchReelsAudioData(
+  researchRunId: string
+): Promise<Array<{ audio_name: string | null; audio_uses: number; views: number; virality_score: number }>> {
+  const supabase = createAdminClient()
+  const { data, error } = await supabase
+    .from("scraped_reels")
+    .select("audio_name, audio_uses, views, virality_score")
+    .eq("research_run_id", researchRunId)
+
+  if (error) {
+    console.error("[fetchReelsAudioData] error (non-fatal):", error)
+    return []
+  }
+
+  return (data ?? []).map((r) => ({
+    audio_name: (r.audio_name as string | null) ?? null,
+    audio_uses: (r.audio_uses as number) ?? 0,
+    views: (r.views as number) ?? 0,
+    virality_score: (r.virality_score as number) ?? 0,
+  }))
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +510,7 @@ export async function storeKeywordClusters(
 }
 
 // ---------------------------------------------------------------------------
-// scraped reels (with classifications + dissections folded into `analysis`)
+// scraped reels (legacy batch insert — not called by the active pipeline)
 
 type CreatorMeta = {
   competitor_type: "big" | "fastest_growing" | "reference" | "discovered"
@@ -555,12 +578,22 @@ type HookSource = {
   hook_type: HookType
   niche: string
   source_reel_id?: string | null
+  /**
+   * Hook strength from the dissector (1–10).
+   * Hooks with strength < 6 are not embedded — they add noise to
+   * semantic search results that feed the script writer.
+   */
+  strength?: number
 }
 
 /**
  * Extract hooks from dissections, embed them, and write to hook_bank.
- * Hooks shorter than 5 words or longer than 30 words are dropped —
- * the dissector sometimes emits whole sentences in `hook.text`.
+ *
+ * Quality filters applied before embedding:
+ *   1. Length: 3–35 words (dissector sometimes emits full sentences)
+ *   2. Strength: ≥6 (calibrated 1–10 from dissector; below 6 = weak/generic)
+ *   3. Dedup: normalised text seen in this batch won't be inserted twice
+ *      (prevents duplicate embeddings when a creator appeared in both Stage 1 + 2)
  */
 export async function extractAndStoreHooks(
   agencyId: string,
@@ -574,16 +607,34 @@ export async function extractAndStoreHooks(
     }))
     .filter((h) => {
       const wordCount = h.hook_text.split(/\s+/).filter(Boolean).length
-      return wordCount >= 3 && wordCount <= 35
+      if (wordCount < 3 || wordCount > 35) return false
+      // Drop weak hooks — score < 6 means "decent opener at best"
+      if (typeof h.strength === "number" && h.strength < 6) return false
+      return true
     })
 
-  if (cleaned.length === 0) return { inserted: 0 }
+  // Dedup within this batch by normalised key to avoid duplicate embeddings.
+  const dedupedMap = new Map<string, (typeof cleaned)[number]>()
+  for (const h of cleaned) {
+    const key = h.hook_text.toLowerCase().replace(/\s+/g, " ").trim()
+    if (!dedupedMap.has(key)) dedupedMap.set(key, h)
+  }
+  const deduped = Array.from(dedupedMap.values())
+
+  const preFilterCount = hooks.length
+  console.log(
+    `[extractAndStoreHooks] ${preFilterCount} raw → ` +
+      `${cleaned.length} after length+strength filter → ` +
+      `${deduped.length} after dedup`
+  )
+
+  if (deduped.length === 0) return { inserted: 0 }
 
   // Embed sequentially — `text-embedding-004` is fast and the volume
-  // (typically 60–80 hooks per research run) doesn't justify
+  // (typically 20–40 quality hooks after filtering) doesn't justify
   // parallelism overhead.
   const embedded: Array<HookSource & { embedding: number[] }> = []
-  for (const h of cleaned) {
+  for (const h of deduped) {
     try {
       const embedding = await embedText(h.hook_text, "RETRIEVAL_DOCUMENT")
       embedded.push({ ...h, embedding })

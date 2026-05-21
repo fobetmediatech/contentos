@@ -1,6 +1,6 @@
 import "server-only"
 
-import { apify } from "./client"
+import { getApifyClient } from "./client"
 import type { ScrapedReelRaw } from "@/lib/research/types"
 
 /**
@@ -21,6 +21,10 @@ export type UrlValidation = {
 }
 
 export function validateVideoUrl(videoUrl: string): UrlValidation {
+  // Empty or blank URL — treat as expired so callers skip or re-scrape
+  if (!videoUrl || !videoUrl.trim()) {
+    return { valid: false, expiresAt: null, minutesRemaining: null }
+  }
   try {
     const url = new URL(videoUrl)
     const oe = url.searchParams.get("oe")
@@ -57,12 +61,13 @@ export async function getValidVideoUrl(
   if (valid) return reel.videoUrl
 
   try {
-    const run = await apify.actor("apify/instagram-reel-scraper").call({
+    const client = getApifyClient()
+    const run = await client.actor("apify/instagram-reel-scraper").call({
       directUrls: [reel.url],
       resultsLimit: 1,
       includeVideoUrl: true,
     })
-    const { items } = await apify.dataset(run.defaultDatasetId).listItems()
+    const { items } = await client.dataset(run.defaultDatasetId).listItems()
     const fresh = items[0] as ScrapedReelRaw | undefined
     return fresh?.videoUrl ?? null
   } catch {
