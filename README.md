@@ -38,37 +38,44 @@ ContentOS automates the full workflow from client onboarding to Hinglish Instagr
 
 ## Research Pipeline
 
-The research pipeline is an Inngest background function (`research-new-client`) that runs for 15–25 minutes per client. It has 10 steps:
+The research pipeline is an Inngest background function (`research-new-client`) that runs for 15–25 minutes per client.
 
 ```
-Step 1  — Generate hashtag clusters     Keyword agent (Gemini Flash-Lite) → 8 intent clusters → ~48 hashtags
-Step 2  — Scrape Instagram              Stage 1: hashtag scrape + keyword-based reel search (Apify, parallel)
-Step 3  — Discover competitors          Pure TypeScript — rank by follower count + virality score
-Step 4  — Persist competitor profiles   Store 10 profiles (5 big + 5 fastest_growing) in Supabase
-Step 4c — Enrich competitor data        Authoritative follower counts from Apify profile scraper
-Step 5  — Scrape competitor reels       Stage 2: top 10 reels per profile (Apify reel scraper)
-Step 5b — Scrape top comments           Top 20 comments per viral reel (Apify comment scraper)
-Step 6  — Transcribe reels              Groq Whisper Turbo (parallel, Hinglish-guided prompt)
-Step 7  — Classify + dissect            Gemini Flash: hook type, format, virality score, visual beats
-Step 8  — Aggregate + synthesise        TypeScript aggregator → DissectionSummary for pillar agent
-Step 9  — Generate content pillars      Gemini Flash → 5 pillars × 3 topic ideas with format notes
-Step 10 — Generate ICP                  Gemini Flash → 3 audience personas from intake + research
-Step 11 — Extract hook bank             Filter strength ≥ 6, deduplicate, embed with pgvector
+generate-hashtags           Keyword agent (Gemini Flash-Lite) → 8 intent clusters → ~48 hashtags
+scrape-hashtags             Stage 1: hashtag scrape + keyword reel search in parallel (Apify)
+discover-competitor-cands   Pure TypeScript — rank scraped handles by follower count + virality
+preflight-reference-crtrs   Scrape reels for intake-form reference creators (Apify, parallel)
+fetch-competitor-data       Authoritative follower counts from Apify profile scraper
+select-competitors          finalizeCompetitors() — merge reference + big + fastest_growing buckets
+validate-ingest             Structural guard — fails fast with NonRetriableError if data is unusable
+store-competitor-profiles   Write up to ~12 profiles to Supabase (reference + big + fastest_growing)
+scrape-profiles             Stage 2: top reels per competitor + top comments (Apify)
+dissect-reels               Gemini Flash: hook type, format, virality tier, visual beats, psychology
+aggregate-dissections       TypeScript aggregator → DissectionSummary for downstream agents
+build-hook-bank             Filter strength ≥ 6, deduplicate, embed with pgvector
+generate-icp                Gemini Flash → 3 personas, enriched with confirmed emotions from research
+generate-pillars            Gemini Flash → 5 pillars × 3 topic ideas with format execution notes
+complete                    Mark research_run + client status complete (or failed_partial with message)
 ```
 
 ### Stage 1: Creator Discovery
 
 The hashtag scraper (`apify/instagram-hashtag-scraper`) and keyword reel scraper (`patient_discovery/instagram-search-reels`) run in parallel. Results are deduped by URL and fed into `discoverCompetitors()`.
 
-Competitor selection is split into two categories:
-- **`big`** — top 5 by follower count (established authority accounts)
-- **`fastest_growing`** — top 5 by virality score (avg views ÷ followers), selected from accounts NOT in `big`
+Competitor selection produces three buckets — merged by `finalizeCompetitors()`:
+- **`reference`** — handles explicitly entered by the agency in the intake form. Preflighted in a dedicated `preflight-reference-creators` step; only included if they actively post Reels. Guaranteed slots regardless of follower count or virality score.
+- **`big`** — top 5 discovered accounts by follower count (established authority)
+- **`fastest_growing`** — top 5 discovered accounts by virality score (avg views ÷ followers), from accounts NOT in `big`
+
+Up to ~12 profiles total are stored per client run (fewer if reference creators had no Reels or the niche had fewer than 5 qualifying accounts).
 
 **Video-active preference:** accounts that posted at least one video in Stage 1 rank ahead of photo/carousel-only accounts. Photo-only accounts (e.g. real-estate listing agencies) return 0 reels from Stage 2 and waste Apify credits. If a niche is structurally photo-only, the pipeline throws a `NonRetriableError` with a plain-English explanation instead of retrying 3 times.
 
+**`failed_partial` status:** if the pipeline completes but some reference creators could not be scraped (actor error, no Reels, or private account), the research run is marked `failed_partial` rather than `failed`. The UI shows the partial results alongside a plain-English message explaining which handles were skipped and why.
+
 ### Stage 2: Reel Scraping
 
-Uses `apify/instagram-reel-scraper` with the `username` field. Reference creators from the intake form are scraped alongside competitors as a discovery hint (not stored in `competitor_profiles`).
+Uses `apify/instagram-reel-scraper` with the `username` field. All three competitor types (`reference`, `big`, `fastest_growing`) are scraped in Stage 2 — reference creators are full first-class competitors at this point and stored in `competitor_profiles`.
 
 ### Cost per research run
 
@@ -316,6 +323,9 @@ All agents live in `lib/gemini/agents/`. They communicate through typed `Input`/
 | `dissector.ts` | Flash | 1024 tokens | Deep per-reel analysis: hooks, visual beats, psychology, virality tier |
 | `pillar.ts` | Flash | 512 tokens | 5 content pillars × 3 topic ideas with format execution notes |
 | `icp.ts` | Flash | 512 tokens | 3 audience personas enriched with confirmed emotions from research |
+| `hook-classifier.ts` | Flash-Lite | 0 | Classifies a hook string into one of 9 archetypes (used in hook bank) |
+| `failure-audit.ts` | Flash-Lite | 0 | Diagnoses pipeline failures and surfaces plain-English remediation steps |
+| `script-writer.ts` | Flash | 512 tokens | Generates Hinglish scripts from pillars, ICP, and hook bank context |
 
 Full agent prompts, I/O contracts, thinking budget rationale, and model routing rules: `docs/AGENTS.md`.
 
@@ -329,7 +339,7 @@ Supabase PostgreSQL with pgvector for semantic hook search. Row-level security e
 |---|---|
 | `clients` | Client profiles — intake answers, ICP, Hinglish level, agency_id |
 | `research_runs` | One row per pipeline execution (status, started_at, completed_at) |
-| `competitor_profiles` | 10 accounts per client (big × 5 + fastest_growing × 5) |
+| `competitor_profiles` | Up to ~12 accounts per client — `reference` (intake-form creators), `big` (top 5 by followers), `fastest_growing` (top 5 by virality) |
 | `scraped_reels` | Every reel from Stage 1 + Stage 2 with engagement metrics |
 | `reel_dissections` | Gemini output per reel (hooks, visual_analysis, funnel_mechanic, etc.) |
 | `content_pillars` | 5 pillars per client with topic_ideas and best_hook_types |
@@ -349,6 +359,7 @@ Full schema with RLS policies and migration instructions: `docs/DATABASE.md`.
 | Hinglish scale | 0–5 per client. Controls AI tone: 0 = pure English, 5 = heavy Hinglish. |
 | Hook quality | Only hooks with dissector strength ≥ 6 enter the hook bank. |
 | Research cost | ~$2.40/run. Never re-run unless explicitly triggered — UI warns before re-run. |
+| Research status | `running → complete` (all good), `failed_partial` (partial data, skipped handles explained), `failed` (no usable data). |
 | Multi-tenancy | Every DB row is scoped to `agency_id`. RLS is always on; never bypassed. |
 
 ---
